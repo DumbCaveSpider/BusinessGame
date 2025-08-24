@@ -326,12 +326,10 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         self.add_item(self.desc)
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Defer immediately to avoid Unknown interaction while scoring
-        if not interaction.response.is_done():
-            try:
-                await interaction.response.defer(ephemeral=True)
-            except Exception:
-                pass
+        # Send an initial ephemeral message (or followup) that we can safely edit later.
+        # This avoids Unknown Webhook errors from editing a missing original response.
+        sent_original = False
+        progress_msg: discord.Message | None = None
 
         owner_name = interaction.user.display_name
         try:
@@ -339,7 +337,7 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         except Exception:
             owner_avatar = None
 
-        # 1) Show progress on the same (deferred) message
+        # 1) Show progress message
         progress = discord.Embed(
             title="Creating your business...",
             description="### 🖊️ Scoring your idea. This may take a few seconds.",
@@ -348,8 +346,20 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         progress.add_field(name="Name", value=self.name.value, inline=False)
         if self.desc.value:
             progress.add_field(name="About", value=self.desc.value[:1024], inline=False)
-        # Remove the select menu while we're creating/rating
-        await interaction.edit_original_response(embed=progress, view=None)
+        # Prefer sending a fresh ephemeral message instead of deferring+editing.
+        if not interaction.response.is_done():
+            await interaction.response.send_message(embed=progress, ephemeral=True)
+            sent_original = True
+            try:
+                progress_msg = await interaction.original_response()
+            except Exception:
+                progress_msg = None
+        else:
+            # If something already responded, fall back to a followup message
+            try:
+                progress_msg = await interaction.followup.send(embed=progress, ephemeral=True, wait=True)
+            except Exception:
+                progress_msg = None
 
         # 2) Score with Gemini
         difficulty, earning, realistic = await _score_business_with_gemini(self.name.value, self.desc.value)
@@ -360,7 +370,21 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         data = _load_users()
         user = data.get(self.user_id)
         if user is None:
-            await interaction.edit_original_response(content="User record missing.", embed=None, view=None)
+            if sent_original:
+                try:
+                    await interaction.edit_original_response(content="User record missing.", embed=None, view=None)
+                except Exception:
+                    if progress_msg is not None:
+                        try:
+                            await progress_msg.edit(content="User record missing.", embed=None, view=None)
+                        except Exception:
+                            pass
+            else:
+                if progress_msg is not None:
+                    try:
+                        await progress_msg.edit(content="User record missing.", embed=None, view=None)
+                    except Exception:
+                        pass
             return
 
         user['slots'][self.slot_index] = {
@@ -388,7 +412,21 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         slot = final_user['slots'][self.slot_index]
         final_embed = _render_business_embed(slot, self.slot_index, final_user, owner_name=owner_name, owner_avatar=owner_avatar)
         final_embed.description = (final_embed.description + "\n" if final_embed.description else "") + "### ✅ Business created successfully."
-        await interaction.edit_original_response(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
+        if sent_original:
+            try:
+                await interaction.edit_original_response(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
+            except Exception:
+                if progress_msg is not None:
+                    try:
+                        await progress_msg.edit(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
+                    except Exception:
+                        pass
+        else:
+            if progress_msg is not None:
+                try:
+                    await progress_msg.edit(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
+                except Exception:
+                    pass
 
 
 class SlotSelect(discord.ui.Select):
@@ -474,6 +512,40 @@ class BusinessView(discord.ui.View):
         data = _load_users()
         user = data.get(str(interaction.user.id)) or {'balance': 0, 'slots': [None], 'purchased_slots': 0}
         await interaction.response.edit_message(embed=_render_passive_embed(user, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+
+    @discord.ui.button(label="Collect", style=discord.ButtonStyle.success)
+    async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Only the owner can collect
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("> ❌ This isn't your business.", ephemeral=True)
+            return
+        data = _load_users()
+        user = data.get(str(interaction.user.id))
+        if not user:
+            await interaction.response.edit_message(embed=_render_passive_embed({'balance': 0, 'slots': [None], 'purchased_slots': 0}, "User not found", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=None)
+            return
+        # Validate slot
+        if self.slot_index >= len(user['slots']) or user['slots'][self.slot_index] is None:
+            await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+            return
+        slot = user['slots'][self.slot_index]
+        amount = _calc_accrued_for_slot(slot)
+        if amount <= 0:
+            await interaction.response.send_message("> ℹ️ Nothing to collect yet.", ephemeral=True)
+            return
+        # Apply collection
+        user['balance'] = int(user.get('balance', 0)) + int(amount)
+        slot['last_collected_at'] = _now()
+        slot['total_earned'] = int(slot.get('total_earned', 0)) + int(amount)
+        _save_users(data)
+        # Re-render business details with confirmation
+        try:
+            owner_avatar = str(interaction.user.display_avatar.url)
+        except Exception:
+            owner_avatar = None
+        embed = _render_business_embed(slot, self.slot_index, user, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
+        embed.description = (embed.description + "\n" if embed.description else "") + f"### ✅ Collected ${amount}"
+        await interaction.response.edit_message(embed=embed, view=BusinessView(self.user_id, self.slot_index, owner_name=self.owner_name, owner_avatar=self.owner_avatar))
 
     @discord.ui.button(label="Sell", style=discord.ButtonStyle.danger)
     async def sell(self, interaction: discord.Interaction, button: discord.ui.Button):

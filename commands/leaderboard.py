@@ -66,6 +66,7 @@ class LeaderboardCommand:
                 app_commands.Choice(name="Most valuable businesses", value="business"),
             ]
         )
+        @app_commands.allowed_contexts(dms=True, guilds=True, private_channels=True)
         async def leaderboard(
             interaction: discord.Interaction,
             category: app_commands.Choice[str],

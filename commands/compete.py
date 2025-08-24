@@ -771,53 +771,49 @@ class CompeteCommand:
         @app_commands.describe(opponent="User to compete against")
         @app_commands.allowed_contexts(dms=True, guilds=True, private_channels=True)
         async def compete(interaction: discord.Interaction, opponent: discord.User):
+            # Defer early to avoid Unknown interaction if checks take longer than 3s
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.defer(ephemeral=True)
+                except Exception:
+                    pass
             a_id = str(interaction.user.id)
             b_id = str(opponent.id)
             if a_id == b_id:
-                await interaction.response.send_message("You cannot compete against yourself.", ephemeral=True)
+                await interaction.followup.send("You cannot compete against yourself.", ephemeral=True)
                 return
             # Disallow competing against bots
             if getattr(opponent, 'bot', False):
-                await interaction.response.send_message("You cannot compete against a bot.", ephemeral=True)
+                await interaction.followup.send("You cannot compete against a bot.", ephemeral=True)
                 return
             # Prevent duplicate battles by either participant
             existing = _ONGOING_BATTLES.get(a_id)
             if existing is not None:
-                try:
-                    await interaction.response.send_message(
-                        f"You're already in an ongoing battle. Jump to it: {existing.jump_url}", ephemeral=True
-                    )
-                except Exception:
-                    await interaction.response.send_message("You're already in an ongoing battle.", ephemeral=True)
+                await interaction.followup.send(
+                    f"You're already in an ongoing battle. Jump to it: {existing.jump_url}", ephemeral=True
+                )
                 return
             opp_existing = _ONGOING_BATTLES.get(b_id)
             if opp_existing is not None:
-                try:
-                    await interaction.response.send_message(
-                        f"That opponent is already in a battle. See it here: {opp_existing.jump_url}", ephemeral=True
-                    )
-                except Exception:
-                    await interaction.response.send_message("That opponent is already in a battle.", ephemeral=True)
+                await interaction.followup.send(
+                    f"That opponent is already in a battle. See it here: {opp_existing.jump_url}", ephemeral=True
+                )
                 return
             data = _load_users()
             a_data = data.get(a_id)
             b_data = data.get(b_id)
             if not a_data or not _has_any_business(a_data):
-                await interaction.response.send_message("You need at least one business to compete. Use '/passive' to create one.", ephemeral=True)
+                await interaction.followup.send("You need at least one business to compete. Use '/passive' to create one.", ephemeral=True)
                 return
             if not b_data or not _has_any_business(b_data):
-                await interaction.response.send_message("The opponent has no businesses yet.", ephemeral=True)
+                await interaction.followup.send("The opponent has no businesses yet.", ephemeral=True)
                 return
 
             title = f"Business Battle"
             embed = discord.Embed(title=title, description="### 🏢 Select businesses to begin.", color=discord.Color.purple())
             view = BattleView(int(a_id), int(b_id), a_data, b_data, interaction.user.display_name, opponent.display_name)
-            await interaction.response.send_message(content=f"{interaction.user.mention} vs {opponent.mention}", embed=embed, view=view)
-            try:
-                msg = await interaction.original_response()
-                view.message = msg
-                # Register ongoing battle for both users
-                _ONGOING_BATTLES[a_id] = msg
-                _ONGOING_BATTLES[b_id] = msg
-            except Exception:
-                view.message = None
+            msg = await interaction.followup.send(content=f"{interaction.user.mention} vs {opponent.mention}", embed=embed, view=view, wait=True)
+            view.message = msg
+            # Register ongoing battle for both users
+            _ONGOING_BATTLES[a_id] = msg
+            _ONGOING_BATTLES[b_id] = msg
