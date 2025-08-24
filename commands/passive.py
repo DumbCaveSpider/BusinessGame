@@ -41,7 +41,7 @@ def _ensure_user(user_id: str) -> Dict[str, Any]:
     user = data.get(user_id)
     if user is None:
         user = {
-            'balance': 0,
+            'balance': 100,
             'slots': [None],  # start with one slot
             'purchased_slots': 0,
         }
@@ -67,8 +67,11 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
 
 
 def _sell_value(slot: Dict[str, Any]) -> int:
-    income = int(slot.get('income_per_day', 0))
-    return int(income * SELL_MULTIPLIER) # Sell value formula
+    # Sell value scales with rating: higher rating => higher value
+    base = int(slot.get('base_income_per_day', slot.get('income_per_day', 0)))
+    rating = float(slot.get('rating', 1.0))
+    effective = max(0, int(round(base * rating)))
+    return int(effective * SELL_MULTIPLIER)
 
 
 # --------------- Gemini Scoring Integration ---------------
@@ -233,7 +236,7 @@ def _render_passive_embed(
     owner_name: str | None = None,
     owner_avatar: str | None = None,
 ) -> discord.Embed:
-    title = "Passive Businesses" + (f" — {owner_name}" if owner_name else "")
+    title = "Passive Businesses"
     embed = discord.Embed(title=title, color=discord.Color.blurple())
     if owner_avatar:
         embed.set_author(name=owner_name or "", icon_url=owner_avatar)
@@ -252,9 +255,16 @@ def _render_passive_embed(
                 field_value = "Empty"
             else:
                 name = slot.get('name', 'Business')
-                inc = slot.get('income_per_day', 0)
+                inc = int(slot.get('income_per_day', 0))
+                base = int(slot.get('base_income_per_day', inc))
+                wins = int(slot.get('wins', 0))
+                losses = int(slot.get('losses', 0))
+                rating = float(slot.get('rating', 1.0))
                 ready = _calc_accrued_for_slot(slot)
-                field_value = f"{name} — ${inc}/day • Ready: ${ready}"
+                field_value = (
+                    f"{name} — ${inc}/day (Base ${base}) • ⭐ {rating:.1f}\n"
+                    f"W/L: {wins}/{losses} • Ready: ${ready}"
+                )
             embed.add_field(name=field_name, value=field_value, inline=False)
 
     # Keep costs and balance in the footer
@@ -272,7 +282,9 @@ def _render_business_embed(
     owner_avatar: str | None = None,
 ) -> discord.Embed:
     name = slot.get('name', f'Business {slot_index + 1}')
-    inc = slot.get('income_per_day', 0)
+    inc = int(slot.get('income_per_day', 0))
+    base = int(slot.get('base_income_per_day', inc))
+    rating = float(slot.get('rating', 1.0))
     total_earned = int(slot.get('total_earned', 0))
     ready = _calc_accrued_for_slot(slot)
     value = _sell_value(slot)
@@ -280,9 +292,13 @@ def _render_business_embed(
     embed = discord.Embed(title=title, color=discord.Color.gold())
     if owner_avatar:
         embed.set_author(name=owner_name or "", icon_url=owner_avatar)
-    embed.add_field(name="📈 Rate", value=f"${inc}/day", inline=True)
+    embed.add_field(name="📈 Rate", value=f"${inc}/day (base ${base})", inline=True)
+    embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     embed.add_field(name="💵 Ready to collect", value=f"${ready}", inline=True)
     embed.add_field(name="💰 Total earned", value=f"${total_earned}", inline=True)
+    wins = int(slot.get('wins', 0))
+    losses = int(slot.get('losses', 0))
+    embed.add_field(name="🏆 Record", value=f"{wins} wins / {losses} losses", inline=True)
     if slot.get('desc'):
         embed.add_field(name="About", value=slot['desc'], inline=False)
     embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: ${value} • Balance: ${user.get('balance', 0)}")
@@ -357,6 +373,10 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
                 'total': total,
             },
             'income_per_day': income_per_day,
+            'difference': total - income_per_day,
+            'rating': 1.0,
+            'wins': 0,
+            'losses': 0,
             'created_at': _now(),
             'last_collected_at': _now(),
             'total_earned': 0,
@@ -449,7 +469,7 @@ class BusinessView(discord.ui.View):
     @discord.ui.button(label="Back", style=discord.ButtonStyle.secondary)
     async def back(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("Only the original user can use these buttons.", ephemeral=True)
+            await interaction.response.send_message("> ❌ nuh uh", ephemeral=True)
             return
         data = _load_users()
         user = data.get(str(interaction.user.id)) or {'balance': 0, 'slots': [None], 'purchased_slots': 0}
@@ -458,7 +478,7 @@ class BusinessView(discord.ui.View):
     @discord.ui.button(label="Sell", style=discord.ButtonStyle.danger)
     async def sell(self, interaction: discord.Interaction, button: discord.ui.Button):
         if str(interaction.user.id) != self.user_id:
-            await interaction.response.send_message("Only the original user can use these buttons.", ephemeral=True)
+            await interaction.response.send_message("> ❌ bro trying to sabotage XDDD", ephemeral=True)
             return
         data = _load_users()
         user = data.get(str(interaction.user.id))
