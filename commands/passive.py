@@ -8,6 +8,8 @@ from discord import app_commands
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
+MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
+PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
 SELL_MULTIPLIER = 0.5  # assumed resale value = income_per_day * SELL_MULTIPLIER
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
@@ -33,6 +35,32 @@ def _load_users() -> Dict[str, Any]:
 def _save_users(data: Dict[str, Any]):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(USER_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+
+
+def _load_market() -> Dict[str, Any]:
+    if not os.path.exists(MARKET_FILE):
+        return {"upgrades": []}
+    with open(MARKET_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {"upgrades": []}
+
+
+def _load_purchases() -> Dict[str, Any]:
+    if not os.path.exists(PURCHASED_FILE):
+        return {}
+    with open(PURCHASED_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+
+def _save_purchases(data: Dict[str, Any]):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(PURCHASED_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
 
 
@@ -63,7 +91,9 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
     last = int(slot.get('last_collected_at') or slot.get('created_at') or _now())
     elapsed = max(0, _now() - last)
     days = elapsed / 86400.0
-    return int(days * rate)
+    accrued = int(days * rate)
+    pending = int(slot.get('pending_collect', 0))
+    return accrued + pending
 
 
 def _sell_value(slot: Dict[str, Any]) -> int:
@@ -233,6 +263,7 @@ async def _score_business_with_gemini(name: str, desc: str) -> Tuple[int, int, i
 def _render_passive_embed(
     user: Dict[str, Any],
     notice: str | None = None,
+    owner_id: str | None = None,
     owner_name: str | None = None,
     owner_avatar: str | None = None,
 ) -> discord.Embed:
@@ -249,6 +280,8 @@ def _render_passive_embed(
     if not user.get('slots'):
         embed.add_field(name="Slots", value="You have no slots yet.", inline=False)
     else:
+        purchases = _load_purchases() if owner_id else {}
+        user_purchases: Dict[str, Any] = purchases.get(str(owner_id), {}) if owner_id else {}
         for idx, slot in enumerate(user['slots']):
             field_name = f"Slot {idx + 1}"
             if slot is None:
@@ -261,10 +294,38 @@ def _render_passive_embed(
                 losses = int(slot.get('losses', 0))
                 rating = float(slot.get('rating', 1.0))
                 ready = _calc_accrued_for_slot(slot)
+                # Compute total boost from purchased upgrades file, fallback to legacy slot['upgrades']
+                slot_key = str(idx)
+                ups_from_file: List[Dict[str, Any]] = user_purchases.get(slot_key, []) if isinstance(user_purchases, dict) else []
+                ups_legacy = slot.get('upgrades', []) or []
+                total_boost = 0.0
+                up_count = 0
+                if ups_from_file:
+                    for up in ups_from_file:
+                        try:
+                            total_boost += float(up.get('boost_pct', 0.0))
+                        except Exception:
+                            continue
+                    up_count = len(ups_from_file)
+                elif ups_legacy:
+                    mk = _load_market()
+                    u_map = {str(u.get('id')): u for u in mk.get('upgrades', [])}
+                    for up in ups_legacy:
+                        if isinstance(up, dict):
+                            total_boost += float(up.get('boost_pct', 0.0))
+                        else:
+                            u = u_map.get(str(up))
+                            if u is not None:
+                                total_boost += float(u.get('boost_pct', 0.0))
+                    up_count = len(ups_legacy)
+                sold = int(slot.get('products_sold', 0))
                 field_value = (
                     f"{name} — ${inc}/day (Base ${base}) • ⭐ {rating:.1f}\n"
-                    f"W/L: {wins}/{losses} • Ready: ${ready}"
+                    f"W/L: {wins}/{losses} • Ready: ${ready} • Sold: {sold}"
                 )
+                # Add a compact upgrades summary line if any
+                if up_count:
+                    field_value += f"\nUpgrades: {up_count} • Boost: +{total_boost:.1f}%"
             embed.add_field(name=field_name, value=field_value, inline=False)
 
     # Keep costs and balance in the footer
@@ -278,6 +339,7 @@ def _render_business_embed(
     slot: Dict[str, Any],
     slot_index: int,
     user: Dict[str, Any],
+    owner_id: str | None = None,
     owner_name: str | None = None,
     owner_avatar: str | None = None,
 ) -> discord.Embed:
@@ -296,9 +358,43 @@ def _render_business_embed(
     embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     embed.add_field(name="💵 Ready to collect", value=f"${ready}", inline=True)
     embed.add_field(name="💰 Total earned", value=f"${total_earned}", inline=True)
+    embed.add_field(name="🛒 Products sold", value=str(int(slot.get('products_sold', 0))), inline=True)
     wins = int(slot.get('wins', 0))
     losses = int(slot.get('losses', 0))
     embed.add_field(name="🏆 Record", value=f"{wins} wins / {losses} losses", inline=True)
+    # Upgrades applied details and total boost (prefer purchases file, fallback to legacy)
+    lines: List[str] = []
+    total_boost = 0.0
+    purchases = _load_purchases() if owner_id else {}
+    ups_from_file: List[Dict[str, Any]] = []
+    if owner_id:
+        ups_from_file = (purchases.get(str(owner_id), {}) or {}).get(str(slot_index), []) or []
+    if ups_from_file:
+        for up in ups_from_file:
+            b = float(up.get('boost_pct', 0.0))
+            total_boost += b
+            lines.append(f"• {up.get('name', 'Upgrade')} (+{b:.1f}%)")
+    else:
+        ups_legacy: List[Any] = slot.get('upgrades', []) or []
+        if ups_legacy:
+            market = _load_market()
+            up_map = {str(u.get('id')): u for u in market.get('upgrades', [])}
+            for up in ups_legacy:
+                if isinstance(up, dict):
+                    b = float(up.get('boost_pct', 0.0))
+                    total_boost += b
+                    lines.append(f"• {up.get('name', 'Upgrade')} (+{b:.1f}%)")
+                else:
+                    u = up_map.get(str(up))
+                    if u is None:
+                        lines.append("• Upgrade (+0.0%)")
+                        continue
+                    b = float(u.get('boost_pct', 0.0))
+                    total_boost += b
+                    lines.append(f"• {u.get('name', 'Upgrade')} (+{b:.1f}%)")
+    if lines:
+        embed.add_field(name="🧩 Upgrades", value="\n".join(lines)[:1024], inline=False)
+        embed.add_field(name="📊 Total boost", value=f"+{total_boost:.1f}%", inline=True)
     if slot.get('desc'):
         embed.add_field(name="About", value=slot['desc'], inline=False)
     embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: ${value} • Balance: ${user.get('balance', 0)}")
@@ -404,13 +500,25 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
             'created_at': _now(),
             'last_collected_at': _now(),
             'total_earned': 0,
+            'products_sold': 0,
+            'pending_collect': 0,
         }
         _save_users(data)
 
         # 4) Final state: show created business and actions
+        # Also clear any previous purchased upgrades persisted for this slot (fresh business)
+        try:
+            purchases = _load_purchases()
+            urec = purchases.get(self.user_id, {}) or {}
+            if str(self.slot_index) in urec:
+                del urec[str(self.slot_index)]
+            purchases[self.user_id] = urec
+            _save_purchases(purchases)
+        except Exception:
+            pass
         final_user = data.get(self.user_id) or user
         slot = final_user['slots'][self.slot_index]
-        final_embed = _render_business_embed(slot, self.slot_index, final_user, owner_name=owner_name, owner_avatar=owner_avatar)
+        final_embed = _render_business_embed(slot, self.slot_index, final_user, owner_id=self.user_id, owner_name=owner_name, owner_avatar=owner_avatar)
         final_embed.description = (final_embed.description + "\n" if final_embed.description else "") + "### ✅ Business created successfully."
         if sent_original:
             try:
@@ -455,7 +563,7 @@ class SlotSelect(discord.ui.Select):
         data = _load_users()
         user = data.get(user_id)
         if user is None:
-            await interaction.response.edit_message(embed=_render_passive_embed({'slots': [None], 'purchased_slots': 0, 'balance': 0}, "User not found", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=self.view)
+            await interaction.response.edit_message(embed=_render_passive_embed({'slots': [None], 'purchased_slots': 0, 'balance': 0}, "User not found", owner_id=self.owner_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=self.view)
             return
 
         notice: str | None = None
@@ -471,14 +579,14 @@ class SlotSelect(discord.ui.Select):
                 _save_users(data)
                 notice = f"### ✅ Purchased a new slot for ${cost}"
             # Re-render regardless of success/failure
-            await interaction.response.edit_message(embed=_render_passive_embed(user, notice, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.owner_id, self.owner_name, self.owner_avatar))
+            await interaction.response.edit_message(embed=_render_passive_embed(user, notice, owner_id=self.owner_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.owner_id, self.owner_name, self.owner_avatar))
             return
 
         idx = int(choice)
         slot = user['slots'][idx]
         if slot is not None:
             # Show business details view
-            await interaction.response.edit_message(embed=_render_business_embed(slot, idx, user, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=BusinessView(user_id, idx, owner_name=self.owner_name, owner_avatar=self.owner_avatar))
+            await interaction.response.edit_message(embed=_render_business_embed(slot, idx, user, owner_id=self.owner_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=BusinessView(user_id, idx, owner_name=self.owner_name, owner_avatar=self.owner_avatar))
             return
 
         # Open modal to create a business in this slot (must respond with a modal, not an edit)
@@ -511,7 +619,10 @@ class BusinessView(discord.ui.View):
             return
         data = _load_users()
         user = data.get(str(interaction.user.id)) or {'balance': 0, 'slots': [None], 'purchased_slots': 0}
-        await interaction.response.edit_message(embed=_render_passive_embed(user, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+        await interaction.response.edit_message(
+            embed=_render_passive_embed(user, owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar),
+            view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar)
+        )
 
     @discord.ui.button(label="Collect", style=discord.ButtonStyle.success)
     async def collect(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -522,11 +633,11 @@ class BusinessView(discord.ui.View):
         data = _load_users()
         user = data.get(str(interaction.user.id))
         if not user:
-            await interaction.response.edit_message(embed=_render_passive_embed({'balance': 0, 'slots': [None], 'purchased_slots': 0}, "User not found", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=None)
+            await interaction.response.edit_message(embed=_render_passive_embed({'balance': 0, 'slots': [None], 'purchased_slots': 0}, "User not found", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=None)
             return
         # Validate slot
         if self.slot_index >= len(user['slots']) or user['slots'][self.slot_index] is None:
-            await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+            await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
             return
         slot = user['slots'][self.slot_index]
         amount = _calc_accrued_for_slot(slot)
@@ -536,6 +647,7 @@ class BusinessView(discord.ui.View):
         # Apply collection
         user['balance'] = int(user.get('balance', 0)) + int(amount)
         slot['last_collected_at'] = _now()
+        slot['pending_collect'] = 0
         slot['total_earned'] = int(slot.get('total_earned', 0)) + int(amount)
         _save_users(data)
         # Re-render business details with confirmation
@@ -543,7 +655,7 @@ class BusinessView(discord.ui.View):
             owner_avatar = str(interaction.user.display_avatar.url)
         except Exception:
             owner_avatar = None
-        embed = _render_business_embed(slot, self.slot_index, user, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
+        embed = _render_business_embed(slot, self.slot_index, user, owner_id=self.user_id, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
         embed.description = (embed.description + "\n" if embed.description else "") + f"### ✅ Collected ${amount}"
         await interaction.response.edit_message(embed=embed, view=BusinessView(self.user_id, self.slot_index, owner_name=self.owner_name, owner_avatar=self.owner_avatar))
 
@@ -555,10 +667,10 @@ class BusinessView(discord.ui.View):
         data = _load_users()
         user = data.get(str(interaction.user.id))
         if not user:
-            await interaction.response.edit_message(embed=_render_passive_embed({'balance': 0, 'slots': [None], 'purchased_slots': 0}, "User not found", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=None)
+            await interaction.response.edit_message(embed=_render_passive_embed({'balance': 0, 'slots': [None], 'purchased_slots': 0}, "User not found", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=None)
             return
         if self.slot_index >= len(user['slots']) or user['slots'][self.slot_index] is None:
-            await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+            await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
             return
         slot = user['slots'][self.slot_index]
         # Enforce a 24-hour hold before selling
@@ -578,7 +690,17 @@ class BusinessView(discord.ui.View):
         user['balance'] = int(user.get('balance', 0)) + int(value)
         user['slots'][self.slot_index] = None
         _save_users(data)
-        await interaction.response.edit_message(embed=_render_passive_embed(user, f"### ✅ Sold {name} for ${value}", owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+        # Clear purchased upgrades for this slot
+        try:
+            purchases = _load_purchases()
+            urec = purchases.get(str(self.user_id), {})
+            if isinstance(urec, dict) and str(self.slot_index) in urec:
+                del urec[str(self.slot_index)]
+            purchases[str(self.user_id)] = urec
+            _save_purchases(purchases)
+        except Exception:
+            pass
+        await interaction.response.edit_message(embed=_render_passive_embed(user, f"### ✅ Sold {name} for ${value}", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
 
 
 class PassiveCommand:
@@ -588,11 +710,21 @@ class PassiveCommand:
         @app_commands.allowed_contexts(dms=True, guilds=True, private_channels=True)
         async def passive(interaction: discord.Interaction):
             user = _ensure_user(str(interaction.user.id))
+            # Normalize existing slots to include pending_collect for older records
+            changed = False
+            for i, s in enumerate(user.get('slots', [])):
+                if s is not None and 'pending_collect' not in s:
+                    s['pending_collect'] = 0
+                    changed = True
+            if changed:
+                data = _load_users()
+                data[str(interaction.user.id)] = user
+                _save_users(data)
             owner_id = str(interaction.user.id)
             owner_name = interaction.user.display_name
             try:
                 owner_avatar = str(interaction.user.display_avatar.url)
             except Exception:
                 owner_avatar = None
-            embed = _render_passive_embed(user, owner_name=owner_name, owner_avatar=owner_avatar)
+            embed = _render_passive_embed(user, owner_id=owner_id, owner_name=owner_name, owner_avatar=owner_avatar)
             await interaction.response.send_message(embed=embed, view=SlotView(user, owner_id, owner_name, owner_avatar))

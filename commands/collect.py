@@ -34,7 +34,9 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
     last = int(slot.get('last_collected_at') or slot.get('created_at') or _now())
     elapsed = max(0, _now() - last)
     days = elapsed / 86400.0
-    return int(days * rate)
+    accrued = int(days * rate)
+    pending = int(slot.get('pending_collect', 0))
+    return accrued + pending
 
 
 class CollectCommand:
@@ -59,6 +61,7 @@ class CollectCommand:
                     total_collected += accrued
                     slot['total_earned'] = int(slot.get('total_earned', 0)) + accrued
                     slot['last_collected_at'] = _now()
+                    slot['pending_collect'] = 0
             user['balance'] = int(user.get('balance', 0)) + total_collected
             _save_users(data)
 

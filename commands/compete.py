@@ -771,10 +771,10 @@ class CompeteCommand:
         @app_commands.describe(opponent="User to compete against")
         @app_commands.allowed_contexts(dms=True, guilds=True, private_channels=True)
         async def compete(interaction: discord.Interaction, opponent: discord.User):
-            # Defer early to avoid Unknown interaction if checks take longer than 3s
+            # Defer immediately so all followups are valid and avoid Unknown Webhook/Interaction
             if not interaction.response.is_done():
                 try:
-                    await interaction.response.defer(ephemeral=True)
+                    await interaction.response.defer(ephemeral=False)
                 except Exception:
                     pass
             a_id = str(interaction.user.id)
