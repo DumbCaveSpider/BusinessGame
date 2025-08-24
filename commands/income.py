@@ -48,10 +48,19 @@ class IncomeCommand:
             total_businesses = sum(1 for s in slots if s)
             combined_rate = sum(int(s.get('income_per_day', 0)) for s in slots if s)
             ready_total = 0
+            total_rating = 0.0
             for s in slots:
                 if not s:
                     continue
                 ready_total += _calc_accrued_for_slot(s)
+                # Sum ratings with minimum 0.1 clamp (no maximum)
+                try:
+                    r = float(s.get('rating', 1.0) or 1.0)
+                except Exception:
+                    r = 1.0
+                if r < 0.1:
+                    r = 0.1
+                total_rating += r
 
             balance = int(user.get('balance', 0))
 
@@ -60,4 +69,5 @@ class IncomeCommand:
             embed.add_field(name="📈 Combined Rate", value=f"${combined_rate}/day", inline=True)
             embed.add_field(name="💵 Ready to Collect", value=f"${ready_total}", inline=True)
             embed.add_field(name="🏢 Businesses", value=str(total_businesses), inline=True)
+            embed.add_field(name="⭐ Total Rating", value=f"{total_rating:.1f}", inline=True)
             await interaction.response.send_message(embed=embed, ephemeral=True)

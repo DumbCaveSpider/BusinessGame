@@ -1,6 +1,7 @@
 import json
 import os
 import time
+import asyncio
 import random
 from typing import Dict, Any, Optional
 
@@ -209,6 +210,12 @@ class ArgumentModal(discord.ui.Modal, title="Make Your Case"):
         if view.a_argument and view.b_argument:
             # Both arguments received: show a temporary judging message
             try:
+                # Disable buttons visually while we evaluate
+                try:
+                    view.submit_button.disabled = True
+                    view.start_button.disabled = True
+                except Exception:
+                    pass
                 embed = view.render_embed()
                 embed.description = "### 🔍 Determining the best argument..."
                 if view.message is None:
@@ -304,8 +311,11 @@ class BattleView(discord.ui.View):
     def update_controls(self) -> None:
         both_selected = (self.a_choice is not None and self.b_choice is not None)
         # Enable/disable buttons
-        self.start_button.disabled = not (both_selected and not self.started and not self.battle_over)
-        self.submit_button.disabled = not (self.started and both_selected and not self.battle_over)
+        # Keep Start disabled while judging too
+        self.start_button.disabled = (not (both_selected and not self.started and not self.battle_over)) or self.judging
+        # Disable submit while judging to prevent new arguments during decision
+        self.submit_button.disabled = (not (self.started and both_selected and not self.battle_over)) or self.judging
+        # Allow forfeiting during judging (enabled if started and both selected and not over)
         self.forfeit_button.disabled = not (self.started and both_selected and not self.battle_over)
 
     def render_embed(self) -> discord.Embed:
@@ -332,10 +342,8 @@ class BattleView(discord.ui.View):
             b_rate = int(b_slot.get('income_per_day', 0))
             a_base = int(a_slot.get('base_income_per_day', 0))
             b_base = int(b_slot.get('base_income_per_day', 0))
-            a_eff = int(round(a_rate * self.a_rating))
-            b_eff = int(round(b_rate * self.b_rating))
-            a_diff = a_eff - a_rate
-            b_diff = b_eff - b_rate
+            a_diff = a_rate - a_base
+            b_diff = b_rate - b_base
             a_diff_str = f"+${abs(a_diff)}" if a_diff > 0 else (f"-${abs(a_diff)}" if a_diff < 0 else "$0")
             b_diff_str = f"+${abs(b_diff)}" if b_diff > 0 else (f"-${abs(b_diff)}" if b_diff < 0 else "$0")
             embed.add_field(
@@ -358,8 +366,8 @@ class BattleView(discord.ui.View):
             embed.add_field(
                 name="⭐ Ratings",
                 value=(
-                    f"{self.a_name}: {self.a_rating:.1f}\n"
-                    f"{self.b_name}: {self.b_rating:.1f}"
+                    f"**{a_name}:** {self.a_rating:.1f}\n"
+                    f"**{b_name}:** {self.b_rating:.1f}"
                 ),
                 inline=False,
             )
@@ -447,6 +455,9 @@ class BattleView(discord.ui.View):
         if self.battle_over:
             await interaction.response.send_message("This battle is already over.", ephemeral=True)
             return
+        if self.judging:
+            await interaction.response.send_message("Judging in progress. Please wait for the round result.", ephemeral=True)
+            return
         if self.a_choice is None or self.b_choice is None:
             await interaction.response.send_message("Wait until both businesses are selected.", ephemeral=True)
             return
@@ -472,9 +483,9 @@ class BattleView(discord.ui.View):
             return
         # Determine winner as the opponent
         winner_char = 'B' if str(interaction.user.id) == self.a_id else 'A'
-        await self._finalize_battle(interaction, winner_char, forfeited=True)
+        await self._finalize_battle(interaction, winner_char, forfeited=True, forfeiter_id=str(interaction.user.id))
 
-    async def _finalize_battle(self, interaction: discord.Interaction, winner_char: str, forfeited: bool = False):
+    async def _finalize_battle(self, interaction: discord.Interaction, winner_char: str, forfeited: bool = False, forfeiter_id: Optional[str] = None):
         # Build a result summary based on current ratings, and persist outcome
         a_user_mention = f"<@{self.a_id}>"
         b_user_mention = f"<@{self.b_id}>"
@@ -506,10 +517,13 @@ class BattleView(discord.ui.View):
         else:
             a_before = a_after = b_before = b_after = None
 
-        if winner_char == 'A':
-            base_line = f"🏳️ {a_user_mention} wins{' by forfeit' if forfeited else ''}."
+        winner_mention = a_user_mention if winner_char == 'A' else b_user_mention
+        loser_mention = b_user_mention if winner_char == 'A' else a_user_mention
+        if forfeited:
+            forfeiter_mention = f"<@{forfeiter_id}>" if forfeiter_id else loser_mention
+            base_line = f"🏳️ {forfeiter_mention} forfeited."
         else:
-            base_line = f"🏳️ {b_user_mention} wins{' by forfeit' if forfeited else ''}."
+            base_line = f"🏆 {winner_mention} wins."
 
         changes = []
         if a_before is not None and a_after is not None:
@@ -542,6 +556,13 @@ class BattleView(discord.ui.View):
             return
         self.judging = True
         try:
+            # Reflect disabled controls immediately
+            try:
+                if self.message is not None:
+                    self.update_controls()
+                    await self.message.edit(view=self)
+            except Exception:
+                pass
             data = _load_users()
             a_user = data.get(self.a_id)
             b_user = data.get(self.b_id)
@@ -571,7 +592,10 @@ class BattleView(discord.ui.View):
                 f"Business B: {nameB} (${rateB}/day)\nArgument B: {argB}\n\n"
                 "Output: A or B"
             )
-            text = await _gemini_generate(prompt)
+            try:
+                text = await asyncio.wait_for(_gemini_generate(prompt), timeout=8.0)
+            except Exception:
+                text = ''
             winner_char = 'A'
             picked = False
             if text:
@@ -636,6 +660,9 @@ class BattleView(discord.ui.View):
                 self.update_controls()
             if not self.battle_over:
                 # Post-round result update in the same message without ending the battle
+                # Clear judging and re-enable controls for next round
+                self.judging = False
+                self.update_controls()
                 embed = self.render_embed()
                 embed.add_field(name="Result", value=result, inline=False)
                 try:
@@ -748,6 +775,10 @@ class CompeteCommand:
             b_id = str(opponent.id)
             if a_id == b_id:
                 await interaction.response.send_message("You cannot compete against yourself.", ephemeral=True)
+                return
+            # Disallow competing against bots
+            if getattr(opponent, 'bot', False):
+                await interaction.response.send_message("You cannot compete against a bot.", ephemeral=True)
                 return
             # Prevent duplicate battles by either participant
             existing = _ONGOING_BATTLES.get(a_id)
