@@ -8,7 +8,7 @@ from discord import app_commands
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
-SELL_MULTIPLIER = 0.2  # assumed resale value = income_per_day * SELL_MULTIPLIER
+SELL_MULTIPLIER = 0.5  # assumed resale value = income_per_day * SELL_MULTIPLIER
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 # Try official Google Gemini client
@@ -71,7 +71,7 @@ def _sell_value(slot: Dict[str, Any]) -> int:
     base = int(slot.get('base_income_per_day', slot.get('income_per_day', 0)))
     rating = float(slot.get('rating', 1.0))
     effective = max(0, int(round(base * rating)))
-    return int(effective * SELL_MULTIPLIER)
+    return int(effective * SELL_MULTIPLIER + _calc_accrued_for_slot(slot))
 
 
 # --------------- Gemini Scoring Integration ---------------
@@ -288,11 +288,11 @@ def _render_business_embed(
     total_earned = int(slot.get('total_earned', 0))
     ready = _calc_accrued_for_slot(slot)
     value = _sell_value(slot)
-    title = f"{name}" + (f" — {owner_name}" if owner_name else "")
+    title = f"{name}"
     embed = discord.Embed(title=title, color=discord.Color.gold())
     if owner_avatar:
         embed.set_author(name=owner_name or "", icon_url=owner_avatar)
-    embed.add_field(name="📈 Rate", value=f"${inc}/day (base ${base})", inline=True)
+    embed.add_field(name="📈 Rate", value=f"${inc}/day (Base ${base})", inline=True)
     embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     embed.add_field(name="💵 Ready to collect", value=f"${ready}", inline=True)
     embed.add_field(name="💰 Total earned", value=f"${total_earned}", inline=True)

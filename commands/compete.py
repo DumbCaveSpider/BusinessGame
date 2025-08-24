@@ -105,7 +105,13 @@ class PlayerSelect(discord.ui.Select):
                 continue
             name = slot.get('name', f"Slot {idx + 1}")
             inc = int(slot.get('income_per_day', 0))
-            rate = float(slot.get('rating', 0))
+            # Show rating with a minimum of 0.1 (no maximum cap)
+            try:
+                rate = float(slot.get('rating', 0) or 0.0)
+            except Exception:
+                rate = 0.0
+            if rate < 0.1:
+                rate = 0.1
             options.append(discord.SelectOption(label=name, description=f"💵 ${inc}/day • ⭐ {rate}", value=str(idx)))
         disabled = False
         if not options:
@@ -124,10 +130,10 @@ class PlayerSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         if str(interaction.user.id) != self.owner_id:
-            await interaction.response.send_message("Only this player's owner can select.", ephemeral=True)
+            await interaction.response.send_message("> ❌ Only this player's owner can select.", ephemeral=True)
             return
         if self.values[0] == "-1":
-            await interaction.response.send_message("You have no businesses to select.", ephemeral=True)
+            await interaction.response.send_message("> ❌ You have no businesses to select. brokey 💀", ephemeral=True)
             return
         view: BattleView = self.view  # type: ignore[assignment]
         idx = int(self.values[0])
@@ -135,16 +141,19 @@ class PlayerSelect(discord.ui.Select):
             view.a_choice = idx
             try:
                 slot = view.a_data['slots'][idx]
-                view.a_rating = float(slot.get('rating', 1.0) or 1.0)
+                r = float(slot.get('rating', 1.0) or 1.0)
             except Exception:
-                view.a_rating = 1.0
+                r = 1.0
+            # Minimum clamp only
+            view.a_rating = max(0.1, r)
         elif str(interaction.user.id) == view.b_id:
             view.b_choice = idx
             try:
                 slot = view.b_data['slots'][idx]
-                view.b_rating = float(slot.get('rating', 1.0) or 1.0)
+                r = float(slot.get('rating', 1.0) or 1.0)
             except Exception:
-                view.b_rating = 1.0
+                r = 1.0
+            view.b_rating = max(0.1, r)
         self.disabled = True
         view.update_controls()
         await interaction.response.edit_message(view=view, embed=view.render_embed())
@@ -168,6 +177,13 @@ class ArgumentModal(discord.ui.Modal, title="Make Your Case"):
             await interaction.response.send_message("> ❌ You not part of this battle.", ephemeral=True)
             return
         view: BattleView = self.parent_view  # type: ignore[attr-defined]
+        # If the battle has already ended (forfeit, timeout, or win), ignore any late arguments
+        if view.battle_over:
+            try:
+                await interaction.response.send_message("> ⚠️ This battle is already over. Your argument was ignored.", ephemeral=True)
+            except Exception:
+                pass
+            return
         text = str(self.argument.value or "").strip()
         if not text:
             await interaction.response.send_message("> ❌ Please provide an argument.", ephemeral=True)
@@ -191,6 +207,19 @@ class ArgumentModal(discord.ui.Modal, title="Make Your Case"):
             except Exception:
                 pass
         if view.a_argument and view.b_argument:
+            # Both arguments received: show a temporary judging message
+            try:
+                embed = view.render_embed()
+                embed.description = "### 🔍 Determining the best argument..."
+                if view.message is None:
+                    try:
+                        view.message = await interaction.original_response()
+                    except Exception:
+                        view.message = None
+                if view.message is not None:
+                    await view.message.edit(embed=embed, view=view)
+            except Exception:
+                pass
             await view.judge(interaction)
 
 
@@ -214,6 +243,9 @@ class BattleView(discord.ui.View):
         self.battle_over: bool = False
         self.a_rating: float = 1.0
         self.b_rating: float = 1.0
+        # Track starting ratings for lose condition (lose only if you drop 0.5 below your starting rating)
+        self.a_start_rating: Optional[float] = None
+        self.b_start_rating: Optional[float] = None
         self.message: Optional[discord.Message] = None
         self.started: bool = False
         self.round: int = 1
@@ -296,8 +328,10 @@ class BattleView(discord.ui.View):
             a_name = a_slot.get('name', f"Slot {self.a_choice+1}")
             b_name = b_slot.get('name', f"Slot {self.b_choice+1}")
             # Use base rate from base_income_per_day if available; fall back to income_per_day
-            a_rate = int(a_slot.get('base_income_per_day', a_slot.get('income_per_day', 0)))
-            b_rate = int(b_slot.get('base_income_per_day', b_slot.get('income_per_day', 0)))
+            a_rate = int(a_slot.get('income_per_day', 0))
+            b_rate = int(b_slot.get('income_per_day', 0))
+            a_base = int(a_slot.get('base_income_per_day', 0))
+            b_base = int(b_slot.get('base_income_per_day', 0))
             a_eff = int(round(a_rate * self.a_rating))
             b_eff = int(round(b_rate * self.b_rating))
             a_diff = a_eff - a_rate
@@ -308,7 +342,7 @@ class BattleView(discord.ui.View):
                 name=self.a_name,
                 value=(
                     f"🏢 Business: {a_name}\n"
-                    f"📈 Rate: ${a_rate}/day • Base: ${a_eff} ({a_diff_str})"
+                    f"📈 Rate: ${a_rate}/day • Base: ${a_base} ({a_diff_str})"
                 ),
                 inline=True,
             )
@@ -316,7 +350,7 @@ class BattleView(discord.ui.View):
                 name=self.b_name,
                 value=(
                     f"🏢 Business: {b_name}\n"
-                    f"📈 Rate: ${b_rate}/day • Base: ${b_eff} ({b_diff_str})"
+                    f"📈 Rate: ${b_rate}/day • Base: ${b_base} ({b_diff_str})"
                 ),
                 inline=True,
             )
@@ -340,7 +374,7 @@ class BattleView(discord.ui.View):
                 if not self.started:
                     embed.description = "### ✅ Both players' business selected. Press 'Start' to begin the battle."
                 else:
-                    desc = "### ⚔️ Battle started! Submit arguments each round. First to drop to 0.5 rating loses. Rating drops double every 5 rounds"
+                    desc = "### ⚔️ Battle started! Submit arguments each round. You lose if you fall 0.5 below your starting rating. Rating drops double every 5 rounds"
                     # Show previous round on top, but hide a player's previous argument once they submit a new one
                     prev_lines: list[str] = []
                     if self.prev_a_argument is not None and self.a_argument is None:
@@ -381,6 +415,15 @@ class BattleView(discord.ui.View):
             await interaction.response.send_message("Both players must select a business first.", ephemeral=True)
             return
         self.started = True
+        # Record starting ratings with minimum clamp
+        try:
+            self.a_start_rating = max(0.1, float(self.a_rating))
+        except Exception:
+            self.a_start_rating = 0.1
+        try:
+            self.b_start_rating = max(0.1, float(self.b_rating))
+        except Exception:
+            self.b_start_rating = 0.1
         # Remove the select menus once the battle starts
         try:
             if self.a_select is not None:
@@ -400,6 +443,9 @@ class BattleView(discord.ui.View):
     async def _submit_pressed(self, interaction: discord.Interaction):
         if str(interaction.user.id) not in (self.a_id, self.b_id):
             await interaction.response.send_message("You're not part of this battle.", ephemeral=True)
+            return
+        if self.battle_over:
+            await interaction.response.send_message("This battle is already over.", ephemeral=True)
             return
         if self.a_choice is None or self.b_choice is None:
             await interaction.response.send_message("Wait until both businesses are selected.", ephemeral=True)
@@ -554,8 +600,9 @@ class BattleView(discord.ui.View):
             if winner_char == 'A':
                 prev_a = self.a_rating
                 prev_b = self.b_rating
-                self.a_rating = round(self.a_rating + delta, 2)
-                self.b_rating = round(max(0.0, self.b_rating - delta), 2)
+                # Apply delta and clamp to minimum 0.1 (no max cap)
+                self.a_rating = max(0.1, round(self.a_rating + delta, 2))
+                self.b_rating = max(0.1, round(self.b_rating - delta, 2))
                 result = (
                     f"📈 Winner: {mentionA} (+{delta_str} rating) • 📉 Loser: {mentionB} (-{delta_str} rating)\n"
                     f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}\n"
@@ -564,19 +611,23 @@ class BattleView(discord.ui.View):
             else:
                 prev_a = self.a_rating
                 prev_b = self.b_rating
-                self.b_rating = round(self.b_rating + delta, 2)
-                self.a_rating = round(max(0.0, self.a_rating - delta), 2)
+                self.b_rating = max(0.1, round(self.b_rating + delta, 2))
+                self.a_rating = max(0.1, round(self.a_rating - delta, 2))
                 result = (
                     f"📈 Winner: {mentionB} (+{delta_str} rating) • 📉 Loser: {mentionA} (-{delta_str} rating)\n"
                     f"**{nameB}:** ⭐ Rating {prev_b:.1f} → {self.b_rating:.1f}\n"
                     f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}"
                 )
 
-            # No base income changes are persisted during battle rounds; only the round state (ratings) changes in-memory
-            if self.a_rating <= 0.5 or self.b_rating <= 0.5:
-                # Determine winner by higher rating
-                winner_char = 'A' if self.a_rating > self.b_rating else ('B' if self.b_rating > self.a_rating else random.choice(['A','B']))
-                await self._finalize_battle(interaction, winner_char)
+            # End condition: a player loses if they fall 0.5 below their starting rating
+            a_start = self.a_start_rating if self.a_start_rating is not None else self.a_rating
+            b_start = self.b_start_rating if self.b_start_rating is not None else self.b_rating
+            a_threshold = a_start - 0.5
+            b_threshold = b_start - 0.5
+            if self.a_rating <= a_threshold:
+                await self._finalize_battle(interaction, 'B')
+            elif self.b_rating <= b_threshold:
+                await self._finalize_battle(interaction, 'A')
             else:
                 self.a_argument = None
                 self.b_argument = None
@@ -649,16 +700,19 @@ def _apply_battle_outcome(
             return None
 
         # Determine fixed base from score total (preferred) or existing fields; and always store it
-        a_base = int(a_slot.get('scores', {}).get('total', a_slot.get('base_income_per_day', a_slot.get('income_per_day', 0))))
-        b_base = int(b_slot.get('scores', {}).get('total', b_slot.get('base_income_per_day', b_slot.get('income_per_day', 0))))
+        a_base = int(a_slot.get('scores', {}).get('total', a_slot.get('base_income_per_day', 0)))
+        b_base = int(b_slot.get('scores', {}).get('total', b_slot.get('base_income_per_day', 0)))
+        a_inc = int(a_slot.get('income_per_day', 0))
+        b_inc = int(b_slot.get('income_per_day', 0))
         a_slot['base_income_per_day'] = a_base
         b_slot['base_income_per_day'] = b_base
         a_slot['wins'] = int(a_slot.get('wins', 0))
         a_slot['losses'] = int(a_slot.get('losses', 0))
         b_slot['wins'] = int(b_slot.get('wins', 0))
         b_slot['losses'] = int(b_slot.get('losses', 0))
-
-        # Apply new incomes based on final ratings
+        # Apply new incomes based on final ratings (min rating 0.1)
+        a_rating = max(0.1, float(a_rating))
+        b_rating = max(0.1, float(b_rating))
         a_after = max(0, int(round(a_base * a_rating)))
         b_after = max(0, int(round(b_base * b_rating)))
         a_before = int(a_slot.get('income_per_day', a_after))
@@ -672,9 +726,9 @@ def _apply_battle_outcome(
         elif winner_char == 'B':
             b_slot['wins'] = int(b_slot.get('wins', 0)) + 1
             a_slot['losses'] = int(a_slot.get('losses', 0)) + 1
-        # Persist final ratings to passive businesses
-        a_slot['rating'] = float(max(0.0, a_rating))
-        b_slot['rating'] = float(max(0.0, b_rating))
+        # Persist final ratings with minimum clamp only
+        a_slot['rating'] = float(a_rating)
+        b_slot['rating'] = float(b_rating)
         _save_users(data)
         return a_before, a_after, b_before, b_after
     except Exception:
