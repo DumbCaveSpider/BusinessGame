@@ -337,11 +337,10 @@ class BattleView(discord.ui.View):
             b_slot = self.b_data['slots'][self.b_choice]
             a_name = a_slot.get('name', f"Slot {self.a_choice+1}")
             b_name = b_slot.get('name', f"Slot {self.b_choice+1}")
-            # Use base rate from base_income_per_day if available; fall back to income_per_day
             a_rate = int(a_slot.get('income_per_day', 0))
             b_rate = int(b_slot.get('income_per_day', 0))
-            a_base = int(a_slot.get('base_income_per_day', 0))
-            b_base = int(b_slot.get('base_income_per_day', 0))
+            a_base = int(a_slot.get('total', 0))
+            b_base = int(b_slot.get('total', 0))
             a_diff = a_rate - a_base
             b_diff = b_rate - b_base
             a_diff_str = f"+${abs(a_diff)}" if a_diff > 0 else (f"-${abs(a_diff)}" if a_diff < 0 else "$0")
