@@ -1,0 +1,8 @@
+# ignore env crap
+.env
+
+# Ignore data files
+/data
+
+# ignore pycache
+commands/__pycache__
