@@ -202,15 +202,30 @@ async def _score_upgrade_with_gemini(name: str, desc: str) -> Tuple[int, int, in
 
 # --------------- Rendering ---------------
 
-def _render_market_embed(upgrades: List[Dict[str, Any]], owner_name: Optional[str] = None, owner_avatar: Optional[str] = None) -> discord.Embed:
+def _render_market_embed(
+    upgrades: List[Dict[str, Any]],
+    owner_name: Optional[str] = None,
+    owner_avatar: Optional[str] = None,
+    *,
+    page: int = 0,
+    page_size: int = 10,
+) -> discord.Embed:
     embed = discord.Embed(title="Market", description="Create or buy community-made upgrades.", color=discord.Color.green())
     if owner_avatar:
         embed.set_author(name=owner_name or "", icon_url=owner_avatar)
+    total = len(upgrades)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    start = page * page_size
+    end = min(total, start + page_size)
+    # Top summary
+    embed.add_field(name="Total products", value=str(total), inline=True)
+    embed.add_field(name="Page", value=f"{page + 1}/{total_pages}", inline=True)
     if not upgrades:
         embed.add_field(name="No upgrades yet", value="Click Create to add one.", inline=False)
     else:
-        # Show up to 10 items
-        for up in upgrades[:10]:
+        # Show only the current page items
+        for up in upgrades[start:end]:
             # Prefer associated business name, fallback to creator for legacy items
             creator = up.get('business_name') or up.get('creator_name', 'Unknown')
             total = int(up.get('rating', {}).get('total', 0))
@@ -345,13 +360,20 @@ class UpgradeSelect(discord.ui.Select):
 
 
 class MarketView(discord.ui.View):
-    def __init__(self, upgrades: List[Dict[str, Any]], owner_name: Optional[str] = None, owner_avatar: Optional[str] = None):
+    def __init__(self, upgrades: List[Dict[str, Any]], owner_name: Optional[str] = None, owner_avatar: Optional[str] = None, *, page: int = 0, page_size: int = 10):
         super().__init__(timeout=120)
-        # Only add selector if there are upgrades to choose from
-        if upgrades:
-            self.add_item(UpgradeSelect(upgrades))
+        self.upgrades = upgrades
+        self.page_size = page_size
+        self.total = len(upgrades)
+        self.total_pages = max(1, (self.total + self.page_size - 1) // self.page_size)
+        self.page = max(0, min(page, self.total_pages - 1))
         self.owner_name = owner_name
         self.owner_avatar = owner_avatar
+        # Add selector for current page items only
+        if self.upgrades:
+            start = self.page * self.page_size
+            end = min(self.total, start + self.page_size)
+            self.add_item(UpgradeSelect(self.upgrades[start:end]))
 
     @discord.ui.button(label="Create Upgrade", style=discord.ButtonStyle.success)
     async def create(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -361,8 +383,31 @@ class MarketView(discord.ui.View):
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         market_data = _load_market()
         upgrades: List[Dict[str, Any]] = market_data.get('upgrades', [])
-        embed = _render_market_embed(upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar)
-        view = MarketView(upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar)
+        # Keep same page but clamp to last page if list shrunk
+        new_total_pages = max(1, (len(upgrades) + self.page_size - 1) // self.page_size)
+        new_page = max(0, min(self.page, new_total_pages - 1))
+        embed = _render_market_embed(upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
+        view = MarketView(upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(label="Prev", style=discord.ButtonStyle.secondary)
+    async def prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.upgrades:
+            await interaction.response.defer()
+            return
+        new_page = max(0, self.page - 1)
+        embed = _render_market_embed(self.upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
+        view = MarketView(self.upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.upgrades:
+            await interaction.response.defer()
+            return
+        new_page = min(self.total_pages - 1, self.page + 1)
+        embed = _render_market_embed(self.upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
+        view = MarketView(self.upgrades, owner_name=self.owner_name, owner_avatar=self.owner_avatar, page=new_page, page_size=self.page_size)
         await interaction.response.edit_message(embed=embed, view=view)
 
 
@@ -580,6 +625,6 @@ class MarketCommand:
                 owner_avatar = str(interaction.user.display_avatar.url)
             except Exception:
                 owner_avatar = None
-            embed = _render_market_embed(upgrades, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
-            view = MarketView(upgrades, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
+            embed = _render_market_embed(upgrades, owner_name=interaction.user.display_name, owner_avatar=owner_avatar, page=0, page_size=10)
+            view = MarketView(upgrades, owner_name=interaction.user.display_name, owner_avatar=owner_avatar, page=0, page_size=10)
             await interaction.response.send_message(embed=embed, view=view)

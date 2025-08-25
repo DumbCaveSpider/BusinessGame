@@ -10,6 +10,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
 MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
 PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
+STOCK_FILE = os.path.join(DATA_DIR, 'stocks.json')
 SELL_MULTIPLIER = 0.5  # assumed resale value = income_per_day * SELL_MULTIPLIER
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
@@ -62,6 +63,16 @@ def _save_purchases(data: Dict[str, Any]):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(PURCHASED_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
+
+
+def _load_stocks() -> Dict[str, Any]:
+    if not os.path.exists(STOCK_FILE):
+        return {"current_pct": 50.0}
+    with open(STOCK_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {"current_pct": 50.0}
 
 
 def _ensure_user(user_id: str) -> Dict[str, Any]:
@@ -276,6 +287,11 @@ def _render_passive_embed(
     if notice:
         embed.description = notice
 
+    # Show current global stock as its own field
+    stock_data = _load_stocks()
+    global_stock_pct = float(stock_data.get('current_pct', 50.0))
+    embed.add_field(name="📉 Global Stock", value=f"{global_stock_pct:.1f}%", inline=False)
+
     # Show each slot as its own field
     if not user.get('slots'):
         embed.add_field(name="Slots", value="You have no slots yet.", inline=False)
@@ -289,6 +305,10 @@ def _render_passive_embed(
             else:
                 name = slot.get('name', 'Business')
                 inc = int(slot.get('income_per_day', 0))
+                # Use global stock (already loaded)
+                stock_pct = global_stock_pct
+                stock_factor = stock_pct / 50.0 if stock_pct != 0 else 0.0
+                disp_inc = int(round(inc * stock_factor))
                 base = int(slot.get('base_income_per_day', inc))
                 wins = int(slot.get('wins', 0))
                 losses = int(slot.get('losses', 0))
@@ -321,6 +341,7 @@ def _render_passive_embed(
                 sold = int(slot.get('products_sold', 0))
                 field_value = (
                     f"{name} — ${inc}/day (Base ${base}) • ⭐ {rating:.1f}\n"
+                    f"Stock: {stock_pct:.1f}% — disp ${disp_inc}/day\n"
                     f"W/L: {wins}/{losses} • Ready: ${ready} • Sold: {sold}"
                 )
                 # Add a compact upgrades summary line if any
@@ -354,7 +375,12 @@ def _render_business_embed(
     embed = discord.Embed(title=title, color=discord.Color.gold())
     if owner_avatar:
         embed.set_author(name=owner_name or "", icon_url=owner_avatar)
+    stock = _load_stocks()
+    stock_pct = float(stock.get('current_pct', 50.0))
+    stock_factor = stock_pct / 50.0 if stock_pct != 0 else 0.0
+    disp_inc = int(round(inc * stock_factor))
     embed.add_field(name="📈 Rate", value=f"${inc}/day (Base ${base})", inline=True)
+    embed.add_field(name="📉 Stock", value=f"{stock_pct:.1f}% • disp ${disp_inc}/day", inline=True)
     embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     embed.add_field(name="💵 Ready to collect", value=f"${ready}", inline=True)
     embed.add_field(name="💰 Total earned", value=f"${total_earned}", inline=True)
@@ -493,6 +519,7 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
                 'total': total,
             },
             'income_per_day': income_per_day,
+            'base_income_per_day': total,
             'difference': total - income_per_day,
             'rating': 1.0,
             'wins': 0,
@@ -673,16 +700,15 @@ class BusinessView(discord.ui.View):
             await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
             return
         slot = user['slots'][self.slot_index]
-        # Enforce a 24-hour hold before selling
+        # Enforce a 10 mins hold before selling
         created_at_val = int(slot.get('created_at', 0))
         if created_at_val > 0:
             elapsed = max(0, _now() - created_at_val)
-            if elapsed < 86400:
-                remaining = 86400 - elapsed
-                hrs = remaining // 3600
-                mins = (remaining % 3600) // 60
+            if elapsed < 600:
+                remaining = 600 - elapsed
+                mins = remaining // 60
                 secs = remaining % 60
-                msg = f"> ❌ You can sell this business after 24 hours.\n> **⌚ Time remaining: {hrs}h {mins}m {secs}s**"
+                msg = f"> ❌ You can sell this business after 10 mins of creating a business.\n> **⌚ Time remaining: {mins}m {secs}s**"
                 await interaction.response.send_message(msg, ephemeral=True)
                 return
         name = slot.get('name', f'Slot {self.slot_index + 1}')
