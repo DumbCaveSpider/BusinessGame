@@ -120,7 +120,7 @@ class LeaderboardCommand:
                     for i, (uid, income, total_rating, count) in enumerate(top, start=1):
                         mention = f"<@{uid}>"
                         lines.append(
-                            f"**{i}.** {mention} — 💵 **<:greensl:1409394243025502258>{income}/day** • ⭐ **{total_rating:.1f}** across **{count}** business(es)"
+                            f"**{i}.** {mention} — 💵 Income **<:greensl:1409394243025502258>{income}/day** • ⭐ **{total_rating:.1f}** across **{count}** business(es)"
                         )
                     _add_chunked_field(embed, "Users", lines)
                 await interaction.response.send_message(embed=embed)
@@ -150,7 +150,7 @@ class LeaderboardCommand:
                         mention = f"<@{uid}>"
                         short_name = name if len(str(name)) <= 64 else (str(name)[:61] + "...")
                         lines.append(
-                            f"**{i}.** {short_name} — {mention} • 💵 **<:greensl:1409394243025502258>{income}/day** • ⭐ **{rating:.1f}** • 🏷️ **<:greensl:1409394243025502258>{int(value)}**"
+                            f"**{i}.** {short_name} — {mention} • 💵 Income **<:greensl:1409394243025502258>{income}/day** • ⭐ **{rating:.1f}** • 🏷️ Value **<:greensl:1409394243025502258>{int(value)}**"
                         )
                     _add_chunked_field(embed, "Businesses", lines)
                 await interaction.response.send_message(embed=embed)

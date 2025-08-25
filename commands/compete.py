@@ -113,7 +113,7 @@ class PlayerSelect(discord.ui.Select):
                 rate = 0.0
             if rate < 0.1:
                 rate = 0.1
-            options.append(discord.SelectOption(label=name, description=f"💵 <:greensl:1409394243025502258>{inc}/day • ⭐ {rate}", value=str(idx)))
+            options.append(discord.SelectOption(label=name, description=f"💵 GL${inc}/day • ⭐ {rate}", value=str(idx)))
         disabled = False
         if not options:
             options = [
@@ -725,8 +725,8 @@ def _apply_battle_outcome(
         if not a_slot or not b_slot:
             return None
 
-        a_base = int(a_slot.get('income_per_day', 0))
-        b_base = int(b_slot.get('income_per_day', 0))
+        a_base = int(a_slot.get('base_income_per_day', 0))
+        b_base = int(b_slot.get('base_income_per_day', 0))
         a_slot['wins'] = int(a_slot.get('wins', 0))
         a_slot['losses'] = int(a_slot.get('losses', 0))
         b_slot['wins'] = int(b_slot.get('wins', 0))
