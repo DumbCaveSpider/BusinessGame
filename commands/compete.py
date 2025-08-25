@@ -349,7 +349,7 @@ class BattleView(discord.ui.View):
                 name=self.a_name,
                 value=(
                     f"🏢 Business: {a_name}\n"
-                    f"📈 Rate: <:greensl:1409394243025502258>{a_rate}/day • Base: <:greensl:1409394243025502258>{a_rate} ({a_diff_str})"
+                    f"📈 Rate: <:greensl:1409394243025502258>{a_rate}/day • Base: <:greensl:1409394243025502258>{a_base} ({a_diff_str})"
                 ),
                 inline=True,
             )
@@ -642,6 +642,81 @@ class BattleView(discord.ui.View):
                     f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}"
                 )
 
+            # Build a concise 1–2 sentence rationale for the decision and replace the embed description with it
+            def _has_numbers(s: str) -> bool:
+                for ch in s:
+                    if ch.isdigit():
+                        return True
+                return False
+
+            def _word_count(s: str) -> int:
+                return len([w for w in (s or '').split() if w.strip()])
+
+            def _contains_any(s: str, kws: list[str]) -> bool:
+                s2 = (s or '').lower()
+                return any(k in s2 for k in kws)
+
+            # Heuristic fallback
+            wcA, wcB = _word_count(argA), _word_count(argB)
+            numsA, numsB = _has_numbers(argA), _has_numbers(argB)
+            biz_kws = ["revenue", "sales", "profit", "customers", "growth", "cost", "margin", "market", "demand"]
+            bizA, bizB = _contains_any(argA, biz_kws), _contains_any(argB, biz_kws)
+            if winner_char == 'A':
+                reason_default = "A's argument was clearer and more persuasive than B's."
+                bits = []
+                if wcA - wcB >= 5:
+                    bits.append(f"it provided more detail ({wcA} vs {wcB} words)")
+                if numsA and not numsB:
+                    bits.append("it used concrete figures")
+                if bizA and not bizB:
+                    bits.append("it focused on business outcomes")
+                reason_heur = ", and ".join(bits) if bits else None
+                chosen_reason = f"A wins because {reason_heur}." if reason_heur else reason_default
+                exp_prompt = (
+                    "You judged two short arguments and chose {nameA} as stronger. In 1-2 sentences, explain why {nameA}'s argument is more convincing than {nameB}'s, "
+                    "focusing on clarity, specificity, and business impact. Do not include labels or prefaces.\n\n"
+                    f"{nameA}: {argA}\n{nameB}: {argB}"
+                )
+            else:
+                reason_default = "B's argument was clearer and more persuasive than A's."
+                bits = []
+                if wcB - wcA >= 5:
+                    bits.append(f"it provided more detail ({wcB} vs {wcA} words)")
+                if numsB and not numsA:
+                    bits.append("it used concrete figures")
+                if bizB and not bizA:
+                    bits.append("it focused on business outcomes")
+                reason_heur = ", and ".join(bits) if bits else None
+                chosen_reason = f"B wins because {reason_heur}." if reason_heur else reason_default
+                exp_prompt = (
+                    "You judged two short arguments and chose {nameB} as stronger. In 1-2 sentences, explain why {nameB}'s argument is more convincing than {nameA}'s, "
+                    "focusing on clarity, specificity, and business impact. Do not include labels or prefaces.\n\n"
+                    f"{nameA}: {argA}\n{nameB}: {argB}"
+                )
+
+            explanation = None
+            try:
+                try:
+                    exp_text = await asyncio.wait_for(_gemini_generate(exp_prompt), timeout=6.0)
+                except Exception:
+                    exp_text = ''
+                exp_text = (exp_text or '').strip()
+                if exp_text:
+                    # Trim to ~2 sentences and reasonable length
+                    # Simple split on newline or period; keep first 2 segments
+                    first = exp_text.split('\n', 1)[0]
+                    parts = [p.strip() for p in first.replace('! ', '!|').replace('? ', '?|').replace('. ', '.|').split('|') if p.strip()]
+                    if parts:
+                        explanation = parts[0]
+                        if len(parts) > 1:
+                            explanation += ' ' + parts[1]
+                        if len(explanation) > 350:
+                            explanation = explanation[:347].rstrip() + '...'
+            except Exception:
+                explanation = None
+            if not explanation:
+                explanation = chosen_reason
+
             # End condition: a player loses if they fall 0.5 below their starting rating
             a_start = self.a_start_rating if self.a_start_rating is not None else self.a_rating
             b_start = self.b_start_rating if self.b_start_rating is not None else self.b_rating
@@ -663,6 +738,14 @@ class BattleView(discord.ui.View):
                 self.judging = False
                 self.update_controls()
                 embed = self.render_embed()
+                # Replace description with short rationale and last round arguments
+                def _clip(txt: str, n: int = 300) -> str:
+                    t = (txt or '').strip()
+                    return t if len(t) <= n else (t[: n - 1].rstrip() + '…')
+                last_a = _clip(argA)
+                last_b = _clip(argB)
+                desc = f"#{explanation}\n\n### 🗳️ Last round:\n> {self.a_mention}: {last_a}\n> {self.b_mention}: {last_b}"
+                embed.description = desc
                 embed.add_field(name="Result", value=result, inline=False)
                 try:
                     if self.message is None:
