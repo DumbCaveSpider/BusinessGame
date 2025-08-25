@@ -422,7 +422,7 @@ def _render_business_embed(
         embed.add_field(name="📊 Total boost", value=f"+{total_boost:.1f}%", inline=True)
     if slot.get('desc'):
         embed.add_field(name="About", value=slot['desc'], inline=False)
-    embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: <:greensl:1409394243025502258>{value} • Balance: <:greensl:1409394243025502258>{user.get('balance', 0)}")
+    embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: GL${value} • Balance: GL${user.get('balance', 0)}")
     return embed
 
 
