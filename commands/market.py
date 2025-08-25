@@ -315,7 +315,7 @@ class UpgradeSelect(discord.ui.Select):
             label = up.get('name', 'Upgrade')
             total = int(up.get('rating', {}).get('total', 0))
             price = int(up.get('price', 0))
-            options.append(discord.SelectOption(label=label[:100], description=f"⭐ {total}/20 • 💵 <:greensl:1409394243025502258>{price}", value=str(up.get('id'))))
+            options.append(discord.SelectOption(label=label[:100], description=f"⭐ {total}/20 • 💵 GL${price}", value=str(up.get('id'))))
         super().__init__(placeholder="Select an upgrade to buy", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):

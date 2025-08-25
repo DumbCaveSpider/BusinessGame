@@ -744,7 +744,7 @@ class BattleView(discord.ui.View):
                     return t if len(t) <= n else (t[: n - 1].rstrip() + '…')
                 last_a = _clip(argA)
                 last_b = _clip(argB)
-                desc = f"#{explanation}\n\n### 🗳️ Last round:\n> {self.a_mention}: {last_a}\n> {self.b_mention}: {last_b}"
+                desc = f"**{explanation}**\n\n### 🗳️ Last round:\n> {self.a_mention}: {last_a}\n> {self.b_mention}: {last_b}"
                 embed.description = desc
                 embed.add_field(name="Result", value=result, inline=False)
                 try:
