@@ -53,6 +53,32 @@ def _flatten_businesses(data: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]
     return rows
 
 
+def _add_chunked_field(embed: discord.Embed, title: str, lines: List[str]) -> None:
+    """Add one or more fields so that each field value stays within 1024 chars."""
+    if not lines:
+        embed.add_field(name=title, value="(none)", inline=False)
+        return
+    chunk = []
+    current_len = 0
+    field_index = 0
+    for line in lines:
+        line_str = line.rstrip()
+        # +1 for newline if chunk not empty
+        extra = len(line_str) + (1 if chunk else 0)
+        if current_len + extra > 1024:
+            embed.add_field(name=title if field_index == 0 else f"{title} (cont.)", value="\n".join(chunk), inline=False)
+            field_index += 1
+            chunk = [line_str]
+            current_len = len(line_str)
+        else:
+            if chunk:
+                current_len += 1  # newline
+            chunk.append(line_str)
+            current_len += len(line_str)
+    if chunk:
+        embed.add_field(name=title if field_index == 0 else f"{title} (cont.)", value="\n".join(chunk), inline=False)
+
+
 class LeaderboardCommand:
     @staticmethod
     async def setup(tree: app_commands.CommandTree):
@@ -94,9 +120,9 @@ class LeaderboardCommand:
                     for i, (uid, income, total_rating, count) in enumerate(top, start=1):
                         mention = f"<@{uid}>"
                         lines.append(
-                            f"**{i}.** {mention} — 💵 **${income}/day** • ⭐ **{total_rating:.1f}** across **{count}** business(es)"
+                            f"**{i}.** {mention} — 💵 **<:greensl:1409394243025502258>{income}/day** • ⭐ **{total_rating:.1f}** across **{count}** business(es)"
                         )
-                    embed.add_field(name="Users", value="\n".join(lines), inline=False)
+                    _add_chunked_field(embed, "Users", lines)
                 await interaction.response.send_message(embed=embed)
 
             else:  # business
@@ -122,8 +148,9 @@ class LeaderboardCommand:
                     lines = []
                     for i, (uid, name, income, rating, value) in enumerate(top, start=1):
                         mention = f"<@{uid}>"
+                        short_name = name if len(str(name)) <= 64 else (str(name)[:61] + "...")
                         lines.append(
-                            f"**{i}.** {name} — {mention} • 💵 **${income}/day** • ⭐ **{rating:.1f}** • 🏷️ **${int(value)}**"
+                            f"**{i}.** {short_name} — {mention} • 💵 **<:greensl:1409394243025502258>{income}/day** • ⭐ **{rating:.1f}** • 🏷️ **<:greensl:1409394243025502258>{int(value)}**"
                         )
-                    embed.add_field(name="Businesses", value="\n".join(lines), inline=False)
+                    _add_chunked_field(embed, "Businesses", lines)
                 await interaction.response.send_message(embed=embed)

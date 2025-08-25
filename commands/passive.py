@@ -109,7 +109,7 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
 
 def _sell_value(slot: Dict[str, Any]) -> int:
     # Sell value scales with rating: higher rating => higher value
-    base = int(slot.get('base_income_per_day', slot.get('income_per_day', 0)))
+    base = int(slot.get('income_per_day', 0))
     rating = float(slot.get('rating', 1.0))
     effective = max(0, int(round(base * rating)))
     return int(effective * SELL_MULTIPLIER + _calc_accrued_for_slot(slot))
@@ -340,9 +340,8 @@ def _render_passive_embed(
                     up_count = len(ups_legacy)
                 sold = int(slot.get('products_sold', 0))
                 field_value = (
-                    f"{name} — ${inc}/day (Base ${base}) • ⭐ {rating:.1f}\n"
-                    f"Stock: {stock_pct:.1f}% — disp ${disp_inc}/day\n"
-                    f"W/L: {wins}/{losses} • Ready: ${ready} • Sold: {sold}"
+                    f"{name} — <:greensl:1409394243025502258>{disp_inc}/day (Base <:greensl:1409394243025502258>{base}) • ⭐ {rating:.1f}\n"
+                    f"W/L: {wins}/{losses} • Ready: <:greensl:1409394243025502258>{ready} • Sold: {sold}"
                 )
                 # Add a compact upgrades summary line if any
                 if up_count:
@@ -351,7 +350,7 @@ def _render_passive_embed(
 
     # Keep costs and balance in the footer
     cost = _next_slot_cost(user)
-    footer = f"Buy new slot cost: ${cost} • Balance: ${user.get('balance', 0)}"
+    footer = f"Buy new slot cost: GL${cost} • Balance: GL${user.get('balance', 0)}"
     embed.set_footer(text=footer)
     return embed
 
@@ -379,11 +378,11 @@ def _render_business_embed(
     stock_pct = float(stock.get('current_pct', 50.0))
     stock_factor = stock_pct / 50.0 if stock_pct != 0 else 0.0
     disp_inc = int(round(inc * stock_factor))
-    embed.add_field(name="📈 Rate", value=f"${inc}/day (Base ${base})", inline=True)
-    embed.add_field(name="📉 Stock", value=f"{stock_pct:.1f}% • disp ${disp_inc}/day", inline=True)
+    embed.add_field(name="📈 Rate", value=f"<:greensl:1409394243025502258>{disp_inc}/day (Base <:greensl:1409394243025502258>{base})", inline=True)
+    embed.add_field(name="📉 Stock", value=f"{stock_pct:.1f}% from <:greensl:1409394243025502258>{inc}/day", inline=True)
     embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
-    embed.add_field(name="💵 Ready to collect", value=f"${ready}", inline=True)
-    embed.add_field(name="💰 Total earned", value=f"${total_earned}", inline=True)
+    embed.add_field(name="💵 Ready to collect", value=f"<:greensl:1409394243025502258>{ready}", inline=True)
+    embed.add_field(name="💰 Total earned", value=f"<:greensl:1409394243025502258>{total_earned}", inline=True)
     embed.add_field(name="🛒 Products sold", value=str(int(slot.get('products_sold', 0))), inline=True)
     wins = int(slot.get('wins', 0))
     losses = int(slot.get('losses', 0))
@@ -423,7 +422,7 @@ def _render_business_embed(
         embed.add_field(name="📊 Total boost", value=f"+{total_boost:.1f}%", inline=True)
     if slot.get('desc'):
         embed.add_field(name="About", value=slot['desc'], inline=False)
-    embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: ${value} • Balance: ${user.get('balance', 0)}")
+    embed.set_footer(text=f"Slot {slot_index + 1} • Sell value: <:greensl:1409394243025502258>{value} • Balance: <:greensl:1409394243025502258>{user.get('balance', 0)}")
     return embed
 
 
@@ -598,13 +597,13 @@ class SlotSelect(discord.ui.Select):
         if choice == 'buy':
             cost = _next_slot_cost(user)
             if user['balance'] < cost:
-                notice = f"### ❌ Not enough funds. Need ${cost}"
+                notice = f"### ❌ Not enough funds. Need <:greensl:1409394243025502258>{cost}"
             else:
                 user['balance'] -= cost
                 user['slots'].append(None)
                 user['purchased_slots'] = user.get('purchased_slots', 0) + 1
                 _save_users(data)
-                notice = f"### ✅ Purchased a new slot for ${cost}"
+                notice = f"### ✅ Purchased a new slot for <:greensl:1409394243025502258>{cost}"
             # Re-render regardless of success/failure
             await interaction.response.edit_message(embed=_render_passive_embed(user, notice, owner_id=self.owner_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.owner_id, self.owner_name, self.owner_avatar))
             return
@@ -683,7 +682,7 @@ class BusinessView(discord.ui.View):
         except Exception:
             owner_avatar = None
         embed = _render_business_embed(slot, self.slot_index, user, owner_id=self.user_id, owner_name=interaction.user.display_name, owner_avatar=owner_avatar)
-        embed.description = (embed.description + "\n" if embed.description else "") + f"### ✅ Collected ${amount}"
+        embed.description = (embed.description + "\n" if embed.description else "") + f"### ✅ Collected <:greensl:1409394243025502258>{amount}"
         await interaction.response.edit_message(embed=embed, view=BusinessView(self.user_id, self.slot_index, owner_name=self.owner_name, owner_avatar=self.owner_avatar))
 
     @discord.ui.button(label="Sell", style=discord.ButtonStyle.danger)
@@ -726,7 +725,7 @@ class BusinessView(discord.ui.View):
             _save_purchases(purchases)
         except Exception:
             pass
-        await interaction.response.edit_message(embed=_render_passive_embed(user, f"### ✅ Sold {name} for ${value}", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
+        await interaction.response.edit_message(embed=_render_passive_embed(user, f"### ✅ Sold {name} for <:greensl:1409394243025502258>{value}", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
 
 
 class PassiveCommand:

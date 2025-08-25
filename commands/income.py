@@ -65,9 +65,9 @@ class IncomeCommand:
             balance = int(user.get('balance', 0))
 
             embed = discord.Embed(title="Income Overview", color=discord.Color.green())
-            embed.add_field(name="🪙 Balance", value=f"${balance}", inline=True)
-            embed.add_field(name="📈 Combined Rate", value=f"${combined_rate}/day", inline=True)
-            embed.add_field(name="💵 Ready to Collect", value=f"${ready_total}", inline=True)
+            embed.add_field(name="🪙 Balance", value=f"<:greensl:1409394243025502258>{balance}", inline=True)
+            embed.add_field(name="📈 Combined Rate", value=f"<:greensl:1409394243025502258>{combined_rate}/day", inline=True)
+            embed.add_field(name="💵 Ready to Collect", value=f"<:greensl:1409394243025502258>{ready_total}", inline=True)
             embed.add_field(name="🏢 Businesses", value=str(total_businesses), inline=True)
             embed.add_field(name="⭐ Total Rating", value=f"{total_rating:.1f}", inline=True)
             await interaction.response.send_message(embed=embed, ephemeral=True)

@@ -98,9 +98,7 @@ def _apply_stock_to_all_users(stock_pct: float) -> None:
         for idx, slot in enumerate(slots):
             if slot is None:
                 continue
-            base = int(slot.get('base_income_per_day', slot.get('scores', {}).get('total', slot.get('income_per_day', 0))))
-            # Ensure we have a baseline stored
-            slot['base_income_per_day'] = base
+            base = int('total', slot.get('base_income_per_day', 0))
             new_income = max(0, int(round(base * factor)))
             if int(slot.get('income_per_day', 0)) != new_income:
                 slot['income_per_day'] = new_income

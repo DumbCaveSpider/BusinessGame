@@ -232,7 +232,7 @@ def _render_market_embed(
             avg = float(up.get('rating', {}).get('average', 0.0))
             price = int(up.get('price', 0))
             embed.add_field(
-                name=f"{up.get('name', 'Upgrade')} — ${price}",
+                name=f"{up.get('name', 'Upgrade')} — <:greensl:1409394243025502258>{price}",
                 value=(
                     f"by **{creator}**\n"
                     f"⭐ Rating: {total}/20 • Income Boost: {avg:.1f}%\n"
@@ -286,7 +286,7 @@ class CreateUpgradeModal(discord.ui.Modal, title="Create Upgrade"):
         pick.add_field(name="Name", value=self.name.value, inline=False)
         pick.add_field(name="Rating", value=f"{total}/20 (avg {average:.1f})", inline=True)
         pick.add_field(name="Boost", value=f"{boost_pct:.1f}%", inline=True)
-        pick.add_field(name="Price", value=f"${price}", inline=True)
+        pick.add_field(name="Price", value=f"<:greensl:1409394243025502258>{price}", inline=True)
         if self.desc.value:
             pick.add_field(name="About", value=self.desc.value[:1024], inline=False)
         draft = {
@@ -315,7 +315,7 @@ class UpgradeSelect(discord.ui.Select):
             label = up.get('name', 'Upgrade')
             total = int(up.get('rating', {}).get('total', 0))
             price = int(up.get('price', 0))
-            options.append(discord.SelectOption(label=label[:100], description=f"⭐ {total}/20 • 💵 ${price}", value=str(up.get('id'))))
+            options.append(discord.SelectOption(label=label[:100], description=f"⭐ {total}/20 • 💵 <:greensl:1409394243025502258>{price}", value=str(up.get('id'))))
         super().__init__(placeholder="Select an upgrade to buy", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
@@ -343,7 +343,7 @@ class UpgradeSelect(discord.ui.Select):
             return
         price = int(up.get('price', 0))
         if int(user.get('balance', 0)) < price:
-            await interaction.response.send_message(f"> ❌ Not enough funds. Need ${price}", ephemeral=True)
+            await interaction.response.send_message(f"> ❌ Not enough funds. Need <:greensl:1409394243025502258>{price}", ephemeral=True)
             return
 
         # Show ephemeral embed + select menu to choose the business to apply to
@@ -352,7 +352,7 @@ class UpgradeSelect(discord.ui.Select):
         embed = discord.Embed(title=f"Apply '{up.get('name')}'", color=discord.Color.blue())
         embed.add_field(name="Rating", value=f"{total}/20 (avg {avg:.1f})", inline=True)
         embed.add_field(name="Boost", value=f"{avg:.1f}%", inline=True)
-        embed.add_field(name="Price", value=f"${price}", inline=True)
+        embed.add_field(name="Price", value=f"<:greensl:1409394243025502258>{price}", inline=True)
         embed.add_field(name="About", value=up.get('desc', '')[:1024], inline=False)
         embed.set_footer(text="Select a business to purchase and apply this upgrade.")
         view = ApplyUpgradeView.build_for_user(user, up)
@@ -421,7 +421,7 @@ class SlotSelectForApply(discord.ui.Select):
             if slot is None:
                 continue
             label = f"{slot.get('name', 'Business')}"
-            desc = f"Income ${int(slot.get('income_per_day', 0))}/day"
+            desc = f"Income <:greensl:1409394243025502258>{int(slot.get('income_per_day', 0))}/day"
             options.append(discord.SelectOption(label=label[:100], description=desc[:100], value=str(idx)))
         if not options:
             options.append(discord.SelectOption(label="No available businesses", value="-1", description="Create one with /passive"))
@@ -457,7 +457,7 @@ class ApplyUpgradeView(discord.ui.View):
             return
         price = int(self.upgrade.get('price', 0))
         if int(user.get('balance', 0)) < price:
-            await interaction.response.edit_message(content=f"> ❌ Not enough funds. Need ${price}", view=None)
+            await interaction.response.edit_message(content=f"> ❌ Not enough funds. Need <:greensl:1409394243025502258>{price}", view=None)
             return
         slot = user['slots'][slot_index]
         # Prevent double-apply of same upgrade (support legacy string IDs and new dict entries)
@@ -515,7 +515,7 @@ class ApplyUpgradeView(discord.ui.View):
         _save_market(market)
         biz_name = slot.get('name', f'Slot {slot_index + 1}')
         up_name = str(self.upgrade.get('name', 'Upgrade'))
-        await interaction.response.edit_message(content=f"> ✅ Applied **{up_name}** to **{biz_name}**\n> 📈 New income: **${new_income}/day**", view=None)
+        await interaction.response.edit_message(content=f"> ✅ Applied **{up_name}** to **{biz_name}**\n> 📈 New income: **<:greensl:1409394243025502258>{new_income}/day**", view=None)
 
     async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
         # Only the caller can apply
@@ -535,7 +535,7 @@ class SellerSlotSelect(discord.ui.Select):
             if slot is None:
                 continue
             label = f"{slot.get('name', 'Business')}"
-            desc = f"Income ${int(slot.get('income_per_day', 0))}/day"
+            desc = f"Income <:greensl:1409394243025502258>{int(slot.get('income_per_day', 0))}/day"
             options.append(discord.SelectOption(label=label[:100], description=desc[:100], value=str(idx)))
         if not options:
             options.append(discord.SelectOption(label="No available businesses", value="-1", description="Create one with /passive"))
@@ -600,7 +600,7 @@ class ChooseSellerBusinessView(discord.ui.View):
         price = int(upgrade.get('price', 0))
         done.add_field(name="Rating", value=f"{total}/20 (avg {average:.1f})", inline=True)
         done.add_field(name="Boost", value=f"{boost_pct:.1f}%", inline=True)
-        done.add_field(name="Price", value=f"${price}", inline=True)
+        done.add_field(name="Price", value=f"<:greensl:1409394243025502258>{price}", inline=True)
         done.add_field(name="Seller business", value=business_name, inline=False)
         await interaction.response.edit_message(embed=done, view=None)
 

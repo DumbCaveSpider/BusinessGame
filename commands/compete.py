@@ -113,7 +113,7 @@ class PlayerSelect(discord.ui.Select):
                 rate = 0.0
             if rate < 0.1:
                 rate = 0.1
-            options.append(discord.SelectOption(label=name, description=f"💵 ${inc}/day • ⭐ {rate}", value=str(idx)))
+            options.append(discord.SelectOption(label=name, description=f"💵 <:greensl:1409394243025502258>{inc}/day • ⭐ {rate}", value=str(idx)))
         disabled = False
         if not options:
             options = [
@@ -339,17 +339,17 @@ class BattleView(discord.ui.View):
             b_name = b_slot.get('name', f"Slot {self.b_choice+1}")
             a_rate = int(a_slot.get('income_per_day', 0))
             b_rate = int(b_slot.get('income_per_day', 0))
-            a_base = int(a_slot.get('total', 0))
-            b_base = int(b_slot.get('total', 0))
+            a_base = int(a_slot.get('base_income_per_day', 0))
+            b_base = int(b_slot.get('base_income_per_day', 0))
             a_diff = a_rate - a_base
             b_diff = b_rate - b_base
-            a_diff_str = f"+${abs(a_diff)}" if a_diff > 0 else (f"-${abs(a_diff)}" if a_diff < 0 else "$0")
-            b_diff_str = f"+${abs(b_diff)}" if b_diff > 0 else (f"-${abs(b_diff)}" if b_diff < 0 else "$0")
+            a_diff_str = f"+<:greensl:1409394243025502258>{abs(a_diff)}" if a_diff > 0 else (f"-<:greensl:1409394243025502258>{abs(a_diff)}" if a_diff < 0 else "<:greensl:1409394243025502258>0")
+            b_diff_str = f"+<:greensl:1409394243025502258>{abs(b_diff)}" if b_diff > 0 else (f"-<:greensl:1409394243025502258>{abs(b_diff)}" if b_diff < 0 else "<:greensl:1409394243025502258>0")
             embed.add_field(
                 name=self.a_name,
                 value=(
                     f"🏢 Business: {a_name}\n"
-                    f"📈 Rate: ${a_rate}/day • Base: ${a_base} ({a_diff_str})"
+                    f"📈 Rate: <:greensl:1409394243025502258>{a_rate}/day • Base: <:greensl:1409394243025502258>{a_rate} ({a_diff_str})"
                 ),
                 inline=True,
             )
@@ -357,7 +357,7 @@ class BattleView(discord.ui.View):
                 name=self.b_name,
                 value=(
                     f"🏢 Business: {b_name}\n"
-                    f"📈 Rate: ${b_rate}/day • Base: ${b_base} ({b_diff_str})"
+                    f"📈 Rate: <:greensl:1409394243025502258>{b_rate}/day • Base: <:greensl:1409394243025502258>{b_base} ({b_diff_str})"
                 ),
                 inline=True,
             )
@@ -526,9 +526,9 @@ class BattleView(discord.ui.View):
 
         changes = []
         if a_before is not None and a_after is not None:
-            changes.append(f"**{nameA}:** ${a_before}/day → ${a_after}/day")
+            changes.append(f"**{nameA}:** <:greensl:1409394243025502258>{a_before}/day → <:greensl:1409394243025502258>{a_after}/day")
         if b_before is not None and b_after is not None:
-            changes.append(f"**{nameB}:** ${b_before}/day → ${b_after}/day")
+            changes.append(f"**{nameB}:** <:greensl:1409394243025502258>{b_before}/day → <:greensl:1409394243025502258>{b_after}/day")
         result = base_line + ("\n" + "\n".join(changes) if changes else "")
 
         embed = self.render_embed()
@@ -587,8 +587,8 @@ class BattleView(discord.ui.View):
                 "Two players present marketing arguments for their businesses. "
                 "Choose the stronger argument considering clarity, persuasiveness, and alignment with a plausible business. "
                 "Respond with ONLY 'A' or 'B' to indicate the winner.\n\n"
-                f"Business A: {nameA} (${rateA}/day)\nArgument A: {argA}\n\n"
-                f"Business B: {nameB} (${rateB}/day)\nArgument B: {argB}\n\n"
+                f"Business A: {nameA} (<:greensl:1409394243025502258>{rateA}/day)\nArgument A: {argA}\n\n"
+                f"Business B: {nameB} (<:greensl:1409394243025502258>{rateB}/day)\nArgument B: {argB}\n\n"
                 "Output: A or B"
             )
             try:
@@ -725,18 +725,12 @@ def _apply_battle_outcome(
         if not a_slot or not b_slot:
             return None
 
-        # Determine fixed base from score total (preferred) or existing fields; and always store it
-        a_base = int(a_slot.get('scores', {}).get('total', a_slot.get('base_income_per_day', 0)))
-        b_base = int(b_slot.get('scores', {}).get('total', b_slot.get('base_income_per_day', 0)))
-        a_inc = int(a_slot.get('income_per_day', 0))
-        b_inc = int(b_slot.get('income_per_day', 0))
-        a_slot['base_income_per_day'] = a_base
-        b_slot['base_income_per_day'] = b_base
+        a_base = int(a_slot.get('income_per_day', 0))
+        b_base = int(b_slot.get('income_per_day', 0))
         a_slot['wins'] = int(a_slot.get('wins', 0))
         a_slot['losses'] = int(a_slot.get('losses', 0))
         b_slot['wins'] = int(b_slot.get('wins', 0))
         b_slot['losses'] = int(b_slot.get('losses', 0))
-        # Apply new incomes based on final ratings (min rating 0.1)
         a_rating = max(0.1, float(a_rating))
         b_rating = max(0.1, float(b_rating))
         a_after = max(0, int(round(a_base * a_rating)))

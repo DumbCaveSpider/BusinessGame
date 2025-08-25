@@ -65,4 +65,4 @@ class CollectCommand:
             user['balance'] = int(user.get('balance', 0)) + total_collected
             _save_users(data)
 
-            await interaction.response.send_message(f"> 🤑 Collected **${total_collected}**. New balance: **${user['balance']}**", ephemeral=True)
+            await interaction.response.send_message(f"> 🤑 Collected **<:greensl:1409394243025502258>{total_collected}**. New balance: **<:greensl:1409394243025502258>{user['balance']}**", ephemeral=True)
