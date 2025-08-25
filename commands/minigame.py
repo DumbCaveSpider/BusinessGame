@@ -584,10 +584,10 @@ class SellingView(discord.ui.View):
 
     async def apply_result_and_advance(self, interaction: discord.Interaction):
         ok, reason = self.last_result if isinstance(self.last_result, tuple) else (False, "")
-        # Compute reward/penalty
-        data = _load_users()
-        ud = data.get(self.owner_id)
-        if not ud:
+        # Compute reward/penalty and ensure user exists
+        data_check = _load_users()
+        ud_check = data_check.get(self.owner_id)
+        if not ud_check:
             try:
                 await interaction.response.send_message("> ❌ User data missing.", ephemeral=True)
             except Exception:
@@ -595,9 +595,10 @@ class SellingView(discord.ui.View):
             return
         biz = self._biz()
         income = int((biz or {}).get('income_per_day', 0))
+        reward = 0
+        penalty = 0
         if ok:
             reward = int(income + random.randint(10, 500))
-            ud['balance'] = int(ud.get('balance', 0)) + reward
             self.wins += 1
             self.total_gained += reward
             # Rating increases on a win
@@ -607,7 +608,6 @@ class SellingView(discord.ui.View):
                 pass
         else:
             penalty = int(random.randint(10, 200))
-            ud['balance'] = max(0, int(ud.get('balance', 0)) - penalty)
             self.fails += 1
             self.lives -= 1
             # Rating drops on a loss
@@ -615,7 +615,19 @@ class SellingView(discord.ui.View):
                 self._adjust_rating(-0.1)
             except Exception:
                 pass
-        _save_users(data)
+        # Persist balance changes AFTER rating adjust to avoid overwriting rating from a stale copy
+        try:
+            data2 = _load_users()
+            ud2 = data2.get(self.owner_id) or {}
+            cur_bal = int(ud2.get('balance', 0))
+            if ok:
+                ud2['balance'] = cur_bal + reward
+            else:
+                ud2['balance'] = max(0, cur_bal - penalty)
+            data2[self.owner_id] = ud2
+            _save_users(data2)
+        except Exception:
+            pass
 
         # Disable pitch/skip until player chooses to advance
         self.pitch_button.disabled = True
@@ -674,7 +686,7 @@ class SellingView(discord.ui.View):
             base = self.start_rating if self.start_rating is not None else rating
             delta = float(rating) - float(base)
             if delta < 0:
-                loss_note = f" ({abs(delta):.1f} lost)"
+                loss_note = f" (-{abs(delta):.1f})"
         except Exception:
             loss_note = ""
         embed.add_field(name="⭐ Rating", value=f"{rating:.1f}{loss_note}", inline=True)
