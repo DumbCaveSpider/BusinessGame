@@ -168,7 +168,8 @@ class ArgumentModal(discord.ui.Modal, title="Make Your Case"):
             label="Why is your business better?",
             style=discord.TextStyle.paragraph,
             placeholder="Convince the customers...",
-            max_length=500,
+            max_length=300,
+            min_length=50,
             required=True,
         )
         self.add_item(self.argument)
