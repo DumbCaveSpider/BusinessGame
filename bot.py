@@ -96,7 +96,7 @@ def _ensure_data_dir() -> None:
 
 def _load_stocks() -> dict:
     _ensure_data_dir()
-    default = {"current_pct": 50.0, "last_tick": _stocks_now(), "history": [{"t": _stocks_now(), "pct": 50.0}]}
+    default = {"current_pct": 100.0, "last_tick": _stocks_now(), "history": [{"t": _stocks_now(), "pct": 100.0}]}
     return _load_json(STOCKS_FILE, default)
 
 

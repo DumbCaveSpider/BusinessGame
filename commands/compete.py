@@ -4,6 +4,7 @@ import time
 import asyncio
 import random
 from typing import Dict, Any, Optional
+import re
 
 import discord
 from discord import app_commands
@@ -188,6 +189,44 @@ async def _gemini_generate(prompt: str) -> str:
 
     import asyncio
     return await asyncio.to_thread(_call_sync)
+
+
+# -------------------- AI detection (argument originality) --------------------
+
+AI_DETECT_THRESHOLD = 85  # 0-100; >= this means likely AI-generated
+
+
+async def _detect_ai_score(text: str) -> Optional[int]:
+    """Return an integer 0-100 indicating AI-likelihood, or None if unavailable.
+    0 = human, 100 = AI text.
+    """
+    s = (text or '').strip()
+    if not s or not GEMINI_API_KEY or genai is None:
+        return None
+    prompt = (
+        "You are an AI-text detector. Given the user's argument below, output ONLY a single integer from 0 to 100 "
+        "indicating how likely the text is AI-generated. 0 = purely human, 100 = definitely AI-generated. No words, no units.\n\n"
+        f"Argument: {s}\n\nScore:"
+    )
+    try:
+        resp = await asyncio.wait_for(_gemini_generate(prompt), timeout=8.0)
+    except Exception:
+        resp = ''
+    if not resp:
+        return None
+    # Extract first integer and clamp 0-100
+    m = re.search(r"\b(\d{1,3})\b", resp)
+    if not m:
+        return None
+    try:
+        val = int(m.group(1))
+        if val < 0:
+            val = 0
+        if val > 100:
+            val = 100
+        return val
+    except Exception:
+        return None
 
 
 # -------------------- UI Components --------------------
@@ -678,65 +717,180 @@ class BattleView(discord.ui.View):
             argB = self.b_argument or ''
             mentionA = f"<@{self.a_id}>"
             mentionB = f"<@{self.b_id}>"
+            result = ""
+
+            # First, run AI detection on both arguments
+            scoreA: Optional[int] = None
+            scoreB: Optional[int] = None
+            try:
+                scoreA, scoreB = await asyncio.gather(_detect_ai_score(argA), _detect_ai_score(argB))
+            except Exception:
+                scoreA, scoreB = None, None
+            aiA = (scoreA is not None and scoreA >= AI_DETECT_THRESHOLD)
+            aiB = (scoreB is not None and scoreB >= AI_DETECT_THRESHOLD)
+
+            # Determine delta; if AI detected => double delta consequences
+            base_delta = self.current_delta()
+            double_delta = round(base_delta * 2.0, 2)
+
+            # Forced outcomes from AI detection
+            if aiA and aiB:
+                # Both lose the round: both ratings drop double delta
+                prev_a = self.a_rating
+                prev_b = self.b_rating
+                self.a_rating = max(0.1, round(self.a_rating - double_delta, 2))
+                self.b_rating = max(0.1, round(self.b_rating - double_delta, 2))
+                result = (
+                    f"🤖 AI-detection: Both arguments flagged ({mentionA}: {scoreA if scoreA is not None else '?'} / 100, "
+                    f"{mentionB}: {scoreB if scoreB is not None else '?'} / 100). Both lose −{self._fmt_num(double_delta)} rating.\n"
+                    f"**{nameA}:** ⭐ {prev_a:.1f} → {self.a_rating:.1f}\n"
+                    f"**{nameB}:** ⭐ {prev_b:.1f} → {self.b_rating:.1f}"
+                )
+                explanation = "Both arguments appear AI-generated. Penalty applied to both."
+                # Persist last round arguments
+                self.prev_a_argument = argA
+                self.prev_b_argument = argB
+                # End condition checks
+                a_start = self.a_start_rating if self.a_start_rating is not None else self.a_rating
+                b_start = self.b_start_rating if self.b_start_rating is not None else self.b_rating
+                a_threshold = a_start - 0.5
+                b_threshold = b_start - 0.5
+                if self.a_rating <= a_threshold:
+                    await self._finalize_battle(interaction, 'B')
+                elif self.b_rating <= b_threshold:
+                    await self._finalize_battle(interaction, 'A')
+                else:
+                    # Advance to next round, no winner
+                    self.a_argument = None
+                    self.b_argument = None
+                    self.round += 1
+                    self.update_controls()
+                if not self.battle_over:
+                    self.judging = False
+                    self.update_controls()
+                    embed = self.render_embed()
+                    def _clip(txt: str, n: int = 300) -> str:
+                        t = (txt or '').strip()
+                        return t if len(t) <= n else (t[: n - 1].rstrip() + '…')
+                    last_a = _clip(argA)
+                    last_b = _clip(argB)
+                    desc = f"**{explanation}**\n\n### 🗳️ Last round:\n> {self.a_mention}: {last_a}\n> {self.b_mention}: {last_b}"
+                    embed.description = desc
+                    embed.add_field(name="Result", value=result, inline=False)
+                    try:
+                        if self.message is None:
+                            try:
+                                self.message = await interaction.original_response()
+                            except Exception:
+                                self.message = None
+                        if self.message is not None:
+                            await self.message.edit(embed=embed, view=self)
+                    except Exception:
+                        pass
+                return
+
+            if aiA and not aiB:
+                # B wins automatically, double delta
+                prev_a = self.a_rating
+                prev_b = self.b_rating
+                self.b_rating = max(0.1, round(self.b_rating + double_delta, 2))
+                self.a_rating = max(0.1, round(self.a_rating - double_delta, 2))
+                winner_char = 'B'
+                result = (
+                    f"🤖 AI-detection: {mentionA}'s argument flagged (score {scoreA}/100). "
+                    f"{mentionB} wins {self._fmt_num(double_delta)} rating!\n"
+                    f"**{nameB}:** ⭐ {prev_b:.1f} → {self.b_rating:.1f}\n"
+                    f"**{nameA}:** ⭐ {prev_a:.1f} → {self.a_rating:.1f}"
+                )
+                # Persist last round arguments
+                self.prev_a_argument = argA
+                self.prev_b_argument = argB
+                # End/battle advance handling mirrors below; reuse finalize/advance block after winner set
+            elif aiB and not aiA:
+                prev_a = self.a_rating
+                prev_b = self.b_rating
+                self.a_rating = max(0.1, round(self.a_rating + double_delta, 2))
+                self.b_rating = max(0.1, round(self.b_rating - double_delta, 2))
+                winner_char = 'A'
+                result = (
+                    f"🤖 AI-detection: {mentionB}'s argument flagged (score {scoreB}/100). "
+                    f"{mentionA} wins {self._fmt_num(double_delta)} rating!\n"
+                    f"**{nameA}:** ⭐ {prev_a:.1f} → {self.a_rating:.1f}\n"
+                    f"**{nameB}:** ⭐ {prev_b:.1f} → {self.b_rating:.1f}"
+                )
+                self.prev_a_argument = argA
+                self.prev_b_argument = argB
+            else:
+                winner_char = ''  # Normal flow below will set this
 
             prompt = (
                 "Two players present marketing arguments for their businesses. "
                 "Choose the stronger argument considering clarity, persuasiveness, and alignment with a plausible business. "
                 "Respond with ONLY 'A' or 'B' to indicate the winner.\n\n"
-                f"Business A: {nameA} (<:greensl:1409394243025502258>{rateA}/day)\nArgument A: {argA}\n\n"
-                f"Business B: {nameB} (<:greensl:1409394243025502258>{rateB}/day)\nArgument B: {argB}\n\n"
+                f"Business A: {nameA} \nArgument A: {argA}\n\n"
+                f"Business B: {nameB} \nArgument B: {argB}\n\n"
                 "Output: A or B"
             )
-            try:
-                text = await asyncio.wait_for(_gemini_generate(prompt), timeout=8.0)
-            except Exception:
-                text = ''
-            winner_char = 'A'
-            picked = False
-            if text:
-                t = text.strip().upper()
-                if 'B' == t or t.startswith('B'):
-                    winner_char = 'B'
-                    picked = True
-                elif 'A' == t or t.startswith('A'):
-                    winner_char = 'A'
-                    picked = True
-            if not picked:
-                lenA = len((argA or '').split())
-                lenB = len((argB or '').split())
-                if lenA != lenB:
-                    winner_char = 'A' if lenA > lenB else 'B'
-                else:
-                    winner_char = random.choice(['A', 'B'])
+            if not winner_char:  # only if AI detection didn't force a decision
+                try:
+                    text = await asyncio.wait_for(_gemini_generate(prompt), timeout=8.0)
+                except Exception:
+                    text = ''
+                winner_char = 'A'
+                picked = False
+                if text:
+                    t = text.strip().upper()
+                    if 'B' == t or t.startswith('B'):
+                        winner_char = 'B'
+                        picked = True
+                    elif 'A' == t or t.startswith('A'):
+                        winner_char = 'A'
+                        picked = True
+                if not picked:
+                    lenA = len((argA or '').split())
+                    lenB = len((argB or '').split())
+                    if lenA != lenB:
+                        winner_char = 'A' if lenA > lenB else 'B'
+                    else:
+                        winner_char = random.choice(['A', 'B'])
 
             # Persist last round arguments so they display at the start of the next round
             self.prev_a_argument = argA
             self.prev_b_argument = argB
 
             # Apply rating changes only; base income remains unchanged during the battle
-            delta = self.current_delta()
+            # Use base or double delta depending on AI forfeit (already applied above). For normal judging use base.
+            delta = base_delta
             delta_str = self._fmt_num(delta)
             if winner_char == 'A':
                 prev_a = self.a_rating
                 prev_b = self.b_rating
                 # Apply delta and clamp to minimum 0.1 (no max cap)
-                self.a_rating = max(0.1, round(self.a_rating + delta, 2))
-                self.b_rating = max(0.1, round(self.b_rating - delta, 2))
-                result = (
-                    f"📈 Winner: {mentionA} (+{delta_str} rating) • 📉 Loser: {mentionB} (-{delta_str} rating)\n"
-                    f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}\n"
-                    f"**{nameB}:** ⭐ Rating {prev_b:.1f} → {self.b_rating:.1f}"
-                )
+                if aiB and not aiA:
+                    # Already applied double above, keep result built above
+                    pass
+                else:
+                    self.a_rating = max(0.1, round(self.a_rating + delta, 2))
+                    self.b_rating = max(0.1, round(self.b_rating - delta, 2))
+                    result = (
+                        f"📈 Winner: {mentionA} (+{delta_str} rating) • 📉 Loser: {mentionB} (-{delta_str} rating)\n"
+                        f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}\n"
+                        f"**{nameB}:** ⭐ Rating {prev_b:.1f} → {self.b_rating:.1f}"
+                    )
             else:
                 prev_a = self.a_rating
                 prev_b = self.b_rating
-                self.b_rating = max(0.1, round(self.b_rating + delta, 2))
-                self.a_rating = max(0.1, round(self.a_rating - delta, 2))
-                result = (
-                    f"📈 Winner: {mentionB} (+{delta_str} rating) • 📉 Loser: {mentionA} (-{delta_str} rating)\n"
-                    f"**{nameB}:** ⭐ Rating {prev_b:.1f} → {self.b_rating:.1f}\n"
-                    f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}"
-                )
+                if aiA and not aiB:
+                    # Already applied double above, keep result built above
+                    pass
+                else:
+                    self.b_rating = max(0.1, round(self.b_rating + delta, 2))
+                    self.a_rating = max(0.1, round(self.a_rating - delta, 2))
+                    result = (
+                        f"📈 Winner: {mentionB} (+{delta_str} rating) • 📉 Loser: {mentionA} (-{delta_str} rating)\n"
+                        f"**{nameB}:** ⭐ Rating {prev_b:.1f} → {self.b_rating:.1f}\n"
+                        f"**{nameA}:** ⭐ Rating {prev_a:.1f} → {self.a_rating:.1f}"
+                    )
 
             # Build a concise 1–2 sentence rationale for the decision and replace the embed description with it
             def _has_numbers(s: str) -> bool:
@@ -769,7 +923,7 @@ class BattleView(discord.ui.View):
                 reason_heur = ", and ".join(bits) if bits else None
                 chosen_reason = f"A wins because {reason_heur}." if reason_heur else reason_default
                 exp_prompt = (
-                    "You judged two short arguments and chose {nameA} as stronger. In 1-2 sentences, explain why {nameA}'s argument is more convincing than {nameB}'s, "
+                    f"You judged two short arguments and chose {nameA} as stronger. In 1-2 sentences, explain why {nameA}'s argument is more convincing than {nameB}'s, "
                     "focusing on clarity, specificity, and business impact. Do not include labels or prefaces.\n\n"
                     f"{nameA}: {argA}\n{nameB}: {argB}"
                 )
@@ -785,7 +939,7 @@ class BattleView(discord.ui.View):
                 reason_heur = ", and ".join(bits) if bits else None
                 chosen_reason = f"B wins because {reason_heur}." if reason_heur else reason_default
                 exp_prompt = (
-                    "You judged two short arguments and chose {nameB} as stronger. In 1-2 sentences, explain why {nameB}'s argument is more convincing than {nameA}'s, "
+                    f"You judged two short arguments and chose {nameB} as stronger. In 1-2 sentences, explain why {nameB}'s argument is more convincing than {nameA}'s, "
                     "focusing on clarity, specificity, and business impact. Do not include labels or prefaces.\n\n"
                     f"{nameA}: {argA}\n{nameB}: {argB}"
                 )
@@ -798,7 +952,6 @@ class BattleView(discord.ui.View):
                     exp_text = ''
                 exp_text = (exp_text or '').strip()
                 if exp_text:
-                    # Trim to ~2 sentences and reasonable length
                     # Simple split on newline or period; keep first 2 segments
                     first = exp_text.split('\n', 1)[0]
                     parts = [p.strip() for p in first.replace('! ', '!|').replace('? ', '?|').replace('. ', '.|').split('|') if p.strip()]
@@ -806,8 +959,6 @@ class BattleView(discord.ui.View):
                         explanation = parts[0]
                         if len(parts) > 1:
                             explanation += ' ' + parts[1]
-                        if len(explanation) > 350:
-                            explanation = explanation[:347].rstrip() + '...'
             except Exception:
                 explanation = None
             if not explanation:

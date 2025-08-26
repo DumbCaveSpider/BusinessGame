@@ -17,6 +17,9 @@ MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
 PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
+# Track active minigames per user to prevent duplicates and provide jump links
+ACTIVE_MINIGAMES: Dict[str, Dict[str, Any]] = {}
+
 try:
     from google import genai  # type: ignore
 except Exception:  # pragma: no cover
@@ -170,6 +173,9 @@ async def _gemini_generate(prompt: str) -> str:
     return await asyncio.to_thread(_call_sync)
 
 
+# (AI-text detection removed)
+
+
 # ----- Minigame components -----
 
 def _list_user_businesses(ud: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any]]]:
@@ -180,24 +186,14 @@ def _list_user_businesses(ud: Dict[str, Any]) -> List[Tuple[int, Dict[str, Any]]
     return out
 
 
-def _persona_seed() -> Dict[str, str]:
-    personas = [
-        {"name": "Tech-savvy student", "need": "affordable but high-quality", "mood": "curious"},
-        {"name": "Busy parent", "need": "convenient and reliable", "mood": "practical"},
-        {"name": "Small business owner", "need": "cost-effective with clear ROI", "mood": "results-driven"},
-        {"name": "Hobbyist", "need": "fun and customizable", "mood": "enthusiastic"},
-        {"name": "Eco-conscious buyer", "need": "sustainable and ethical", "mood": "thoughtful"},
-    ]
-    return random.choice(personas)
-
-
 async def _generate_customer_prompt(biz_name: str, biz_desc: str) -> str:
-    p = _persona_seed()
     base = (
-        f"Roleplay a {p['mood']} customer persona ({p['name']}) interested in a product that is {p['need']}. "
-        f"You're considering buying from a business called '{biz_name}'. "
-        f"Business about: {biz_desc}. "
-        "In 1-2 short sentences, state your need and a hesitation or question."
+        "You are a customer and wanted to buy a product from the business."
+        "You ask what is the business all about and what do they have to offer then ask something that the business has to offer."
+        "Use any persona that might fit with the business to have some personality as a customer."
+        "Keep it 1-3 short sentences. "
+        f"Business name: '{biz_name}'. Brief about: {biz_desc}. "
+        "Examples of acceptable questions: 'What's the price and how does it work?' or 'What are the key features and turnaround time?'"
     )
     text = ''
     try:
@@ -216,19 +212,16 @@ async def _generate_customer_prompt(biz_name: str, biz_desc: str) -> str:
     # Ensure fallback when empty or non-sentential
     sents = _split_sentences(text)
     if not sents:
-        print("[Minigame] _generate_customer_prompt: Model returned empty/invalid text; using fallback template.")
+        print("[Minigame] _generate_customer_prompt: Model returned empty/invalid text; using neutral fallback.")
         text = (
-            f"I'm a {p['name']} looking for something {p['need']}. "
-            "Before I buy, how will this help me?"
+            "What's the price and how does it work?"
         )
         sents = _split_sentences(text)
 
     # Ensure at least two short sentences by appending a brief follow-up if needed
     if len(sents) == 1:
-        print("[Minigame] _generate_customer_prompt: Only one sentence from model; appending brief follow-up.")
-        follow = "Can you explain briefly how this solves my need?"
-        if p.get('need'):
-            follow = f"Can you explain briefly how this meets my '{p['need']}' need?"
+        print("[Minigame] _generate_customer_prompt: Only one sentence from model; appending neutral follow-up.")
+        follow = "What are the key features?"
         if sents[0] and sents[0][-1] not in '.!?':
             sents[0] = sents[0] + '.'
         sents.append(follow)
@@ -246,17 +239,11 @@ def _heuristic_convincing(pitch: str) -> bool:
     if len(s.split()) < 4:
         return False
     has_num = any(ch.isdigit() for ch in s)
-    has_value = any(k in s for k in [
-        "save", "increase", "boost", "improve", "benefit", "value", "roi", "return", "free", "trial", "discount",
-        "guarantee", "warranty", "results", "risk-free", "money-back"
-    ])
     has_customer = any(k in s for k in ["you", "your", "customers", "client", "audience"])  # talks to customer
     has_social = any(k in s for k in ["reviews", "testimonials", "trusted", "rated"])  # social proof
     longish = len(s) > 40
     # Easier scoring: lower threshold and multiple simple win conditions
-    score = (1 if has_num else 0) + (2 if has_value else 0) + (2 if has_customer else 0) + (1 if longish else 0) + (1 if has_social else 0)
-    if has_value and (has_customer or has_num or longish):
-        return True
+    score = (1 if has_num else 0) + (2 if has_customer else 0) + (1 if longish else 0) + (1 if has_social else 0)
     return score >= 2
 
 
@@ -308,11 +295,6 @@ async def _decline_reason_model(customer_text: str, pitch: str) -> str:
         text = (await asyncio.wait_for(_gemini_generate(prompt), timeout=12.0)).strip()
         # Normalize and constrain
         text = (text or '').replace('\n', ' ').strip().strip('"').strip("'")
-        if len(text) > 140:
-            text = text[:137].rstrip() + '...'
-        if text:
-            # Ensure it starts with a capital
-            return text[0].upper() + text[1:]
     except Exception as e:
         print(f"[Minigame] _decline_reason_model: Model call failed ({type(e).__name__}: {e}); using heuristic reason.")
     # Fallback
@@ -332,8 +314,8 @@ def _decline_reason(customer_text: str, pitch: str) -> str:
 
     has_num = any(ch.isdigit() for ch in p)
     talks_to_customer = any(k in p for k in ["you", "your", "customers", "client", "audience"])
-    mentions_value = any(k in p for k in [
-        "save", "increase", "boost", "improve", "benefit", "value", "roi", "return", "free", "trial", "discount",
+    mentions_benefit = any(k in p for k in [
+        "save", "increase", "boost", "improve", "benefit", "return", "free", "trial", "discount",
         "results", "growth", "profit", "revenue"
     ])
 
@@ -341,32 +323,61 @@ def _decline_reason(customer_text: str, pitch: str) -> str:
     def _missing(topic_words: List[str], reply_words: List[str]) -> bool:
         return any(w in ct for w in topic_words) and not any(w in p for w in reply_words)
 
-    if _missing(["price", "cost", "budget", "expensive", "affordable", "cheap"], ["price", "cost", "budget", "discount", "save", "affordable"]):
-        return "They mentioned price concerns, but your pitch didn't address cost, savings, or discounts."
-
-    if _missing(["reliable", "reliability", "quality", "durable", "support", "warranty", "guarantee"], [
-        "reliable", "quality", "durable", "support", "warranty", "guarantee"
-    ]):
-        return "They asked about reliability/quality, but your pitch didn't cover support, warranty, or durability."
-
-    if _missing(["time", "busy", "setup", "easy", "quick", "fast"], ["easy", "simple", "quick", "fast", "setup", "onboarding"]):
-        return "They care about ease and time, but your pitch didn't explain how it's quick or easy to use."
-
-    if _missing(["eco", "green", "environment", "sustainable", "sustainability"], ["eco", "green", "sustainable", "recycl", "carbon"]):
-        return "They raised sustainability, but your pitch didn't mention any eco-friendly aspects."
-
-    if _missing(["roi", "return", "profit", "sales", "growth"], ["roi", "return", "profit", "sales", "growth", "results"]):
-        return "They wanted ROI/results, but your pitch didn't quantify outcomes or business impact."
-
     if not talks_to_customer:
         return "Declined: the pitch doesn't speak to the customer's needs ('you/your') or context."
-    if not mentions_value:
-        return "Declined: benefits/value aren't clear—explain what's in it for them."
+    if not mentions_benefit:
+        return "Declined: benefits aren't clear—explain what's in it for them."
     if not has_num:
         return "Declined: no concrete numbers or examples—add metrics, timelines, or guarantees."
 
     # Fallback generic reason
     return "They didn't see how your pitch connects clearly to their stated need. Tie benefits directly to it."
+
+
+async def _feedback_for_pitch(customer_text: str, pitch: str, accepted: bool) -> str:
+    """Return one short, specific feedback sentence from the customer's perspective.
+    Uses the model if available, with a fast timeout, otherwise falls back to a heuristic.
+    """
+    ct = (customer_text or '').strip()
+    pv = (pitch or '').strip()
+    if not pv:
+        return "No pitch to respond to."
+    if not GEMINI_API_KEY or genai is None:
+        # Heuristic fallback
+        if accepted:
+            return "Clear fit and benefits made the choice easy."
+        # Leverage decline reason to craft feedback
+        why = _decline_reason(ct, pv)
+        return f"I'd need this addressed: {why.replace('Declined: ', '')}"
+    try:
+        intent = (
+            "You accepted the offer. In ONE short sentence (<=120 chars), say what convinced you."
+            if accepted else
+            "You declined the offer. In ONE short sentence (<=120 chars), say what would have convinced you."
+        )
+        prompt = (
+            "From the customer's perspective, give feedback about the seller's pitch. "
+            "Be specific and actionable.\n\n"
+            f"Customer: {ct}\n"
+            f"Pitch: {pv}\n\n"
+            f"{intent}"
+        )
+        try:
+            fb = (await asyncio.wait_for(_gemini_generate(prompt), timeout=8.0)).strip()
+        except Exception:
+            fb = ''
+        fb = (fb or '').replace('\n', ' ').strip().strip('"').strip("'")
+        if not fb:
+            if accepted:
+                return "Clear fit and benefits made the choice easy."
+            why = _decline_reason(ct, pv)
+            return f"I'd need this addressed: {why.replace('Declined: ', '')}"
+        return fb
+    except Exception:
+        if accepted:
+            return "Clear fit and benefits made the choice easy."
+        why = _decline_reason(ct, pv)
+        return f"I'd need this addressed: {why.replace('Declined: ', '')}"
 
 
 class PitchModal(discord.ui.Modal, title="Your Sales Pitch"):
@@ -380,6 +391,7 @@ class PitchModal(discord.ui.Modal, title="Your Sales Pitch"):
             max_length=500,
             required=True,
         )
+        
         self.add_item(self.pitch)
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -422,11 +434,13 @@ class PitchModal(discord.ui.Modal, title="Your Sales Pitch"):
 
 
 class SellingView(discord.ui.View):
-    def __init__(self, owner_id: int, user_data: Dict[str, Any]):
+    def __init__(self, owner_id: int, user_data: Dict[str, Any], owner_name: Optional[str] = None, owner_avatar: Optional[str] = None):
         super().__init__(timeout=300)
         self.owner_id = str(owner_id)
         self.user_data = user_data
-        self.goal = random.randint(3, 6)
+        self.owner_name = owner_name
+        self.owner_avatar = owner_avatar
+        self.goal = random.randint(1, 6)
         self.lives = 3
         self.wins = 0
         self.fails = 0
@@ -436,6 +450,7 @@ class SellingView(discord.ui.View):
         self.customer_text: Optional[str] = None
         self.last_pitch: Optional[str] = None
         self.last_result: Optional[Tuple[bool, str]] = None
+        self.last_feedback: Optional[str] = None
         self.message_id: Optional[int] = None
         self.thinking = False
         self.ready_for_next = False
@@ -496,6 +511,8 @@ class SellingView(discord.ui.View):
             self.customer_text = "Waiting for a customer..."
             self.last_pitch = None
             self.last_result = None
+            self.last_feedback = None
+            # (AI detection removed)
             # Buttons may not exist yet; guard accesses until after creation
             try:
                 self.pitch_button.disabled = True
@@ -551,21 +568,20 @@ class SellingView(discord.ui.View):
             if str(interaction.user.id) != self.owner_id:
                 await interaction.response.send_message("> ❌ Not your minigame.", ephemeral=True)
                 return
-            self.fails += 1
-            self.lives -= 1
             self.last_result = (False, "Skipped customer.")
+            # (AI detection removed)
             self.thinking = False
-            # Rating drops on a loss
-            try:
-                self._adjust_rating(-0.1)
-            except Exception:
-                pass
             # If the game is over after skipping, end; otherwise instantly generate the next customer
             if self.wins >= self.goal or self.fails >= 3:
                 self.ready_for_next = False
                 self.next_button.disabled = True
                 await self._advance_or_end()
-                await interaction.response.edit_message(embed=self.render_embed(), view=self)
+                # Deactivate UI on finished game
+                try:
+                    self.stop()
+                except Exception:
+                    pass
+                await interaction.response.edit_message(embed=self.render_embed(), view=None)
                 return
 
             # Prepare immediate next customer generation
@@ -581,6 +597,8 @@ class SellingView(discord.ui.View):
             self.customer_text = "*Waiting for a customer...*"
             self.last_pitch = None
             self.last_result = None
+            self.last_feedback = None
+            # (AI detection removed)
             await interaction.response.edit_message(embed=self.render_embed(), view=self)
 
             async def _gen_after_skip():
@@ -635,6 +653,8 @@ class SellingView(discord.ui.View):
             self.last_pitch = None
             self.last_result = None
             self.thinking = False
+            self.last_feedback = None
+            # (AI detection removed)
             try:
                 await interaction.edit_original_response(embed=self.render_embed(), view=self)
             except Exception:
@@ -680,11 +700,20 @@ class SellingView(discord.ui.View):
                 self.end_button.disabled = True
             except Exception:
                 pass
+            # Clear active session and stop view so message is no longer interactive
             try:
-                await interaction.response.edit_message(embed=self.render_embed(), view=self)
+                ACTIVE_MINIGAMES.pop(self.owner_id, None)
+            except Exception:
+                pass
+            try:
+                self.stop()
+            except Exception:
+                pass
+            try:
+                await interaction.response.edit_message(embed=self.render_embed(), view=None)
             except Exception:
                 try:
-                    await interaction.edit_original_response(embed=self.render_embed(), view=self)
+                    await interaction.edit_original_response(embed=self.render_embed(), view=None)
                 except Exception:
                     pass
 
@@ -741,6 +770,7 @@ class SellingView(discord.ui.View):
         self.customer_text = await _generate_customer_prompt(biz.get('name', 'Business'), biz.get('desc', ''))
         self.last_pitch = None
         self.last_result = None
+        self.last_feedback = None
         # Enable pitching controls
         self.pitch_button.disabled = False
         self.skip_button.disabled = False
@@ -757,6 +787,10 @@ class SellingView(discord.ui.View):
             _save_users(data)
             self.total_gained += base_bonus
             self.over = True
+            try:
+                ACTIVE_MINIGAMES.pop(self.owner_id, None)
+            except Exception:
+                pass
             # Disable controls
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
@@ -765,15 +799,27 @@ class SellingView(discord.ui.View):
                 self.end_button.disabled = True
             except Exception:
                 pass
+            try:
+                self.stop()
+            except Exception:
+                pass
             return
         if self.fails >= 3:
             self.over = True
+            try:
+                ACTIVE_MINIGAMES.pop(self.owner_id, None)
+            except Exception:
+                pass
             # Disable controls
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
             self.next_button.disabled = True
             try:
                 self.end_button.disabled = True
+            except Exception:
+                pass
+            try:
+                self.stop()
             except Exception:
                 pass
             return
@@ -782,6 +828,13 @@ class SellingView(discord.ui.View):
 
     async def apply_result_and_advance(self, interaction: discord.Interaction):
         ok, reason = self.last_result if isinstance(self.last_result, tuple) else (False, "")
+        # Generate customer feedback for the pitch
+        try:
+            self.last_feedback = (await asyncio.wait_for(
+                _feedback_for_pitch(self.customer_text or '', self.last_pitch or '', ok), timeout=9.0
+            )).strip()
+        except Exception:
+            self.last_feedback = None
         # Compute reward/penalty and ensure user exists
         data_check = _load_users()
         ud_check = data_check.get(self.owner_id)
@@ -840,22 +893,25 @@ class SellingView(discord.ui.View):
             self.next_button.disabled = False
         # Prefer editing the original response (works after modal defer)
         try:
-            await interaction.edit_original_response(embed=self.render_embed(), view=self)
+            await interaction.edit_original_response(embed=self.render_embed(), view=None if self.over else self)
             return
         except Exception:
             pass
         # If not available, try editing the interaction response (component path)
         try:
-            await interaction.response.edit_message(embed=self.render_embed(), view=self)
+            await interaction.response.edit_message(embed=self.render_embed(), view=None if self.over else self)
             return
         except Exception:
             pass
         # Fallback: followup with stored message id or send ephemeral
         try:
             if self.message_id:
-                await interaction.followup.edit_message(message_id=self.message_id, embed=self.render_embed(), view=self)
+                await interaction.followup.edit_message(message_id=self.message_id, embed=self.render_embed(), view=None if self.over else self)
             else:
-                await interaction.followup.send(embed=self.render_embed(), view=self, ephemeral=True)
+                if self.over:
+                    await interaction.followup.send(embed=self.render_embed(), ephemeral=True)
+                else:
+                    await interaction.followup.send(embed=self.render_embed(), view=self, ephemeral=True)
         except Exception:
             pass
 
@@ -867,6 +923,12 @@ class SellingView(discord.ui.View):
         title = "Minigame — Sale Pitch"
         color = discord.Color.green() if not self.over else (discord.Color.gold() if self.wins >= self.goal else discord.Color.red())
         embed = discord.Embed(title=title, color=color)
+        # Set author to invoking player's name/avatar if available
+        try:
+            if self.owner_name or self.owner_avatar:
+                embed.set_author(name=self.owner_name or "", icon_url=self.owner_avatar)
+        except Exception:
+            pass
         embed.add_field(name="🎯 Goal", value=f"Close {self.goal} sales", inline=True)
         embed.add_field(name="📊 Progress", value=f"✅ {self.wins} • ❌ {self.fails}", inline=True)
         if self.business_index is None:
@@ -881,24 +943,26 @@ class SellingView(discord.ui.View):
         embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     # Current customer
         if not self.over:
-            # Show pitch and thinking/result in description when available
+            # Customer field
+            embed.add_field(name=f"🛃 Customer #{self.customer_num}", value=self.customer_text or "…", inline=False)
+            # User's pitch as a dedicated field under the customer field
             if self.last_pitch:
+                pitch_field = self.last_pitch
                 if self.thinking:
-                    embed.description = f"### Your pitch\n{self.last_pitch}\n\n🤔 Customer is thinking…"
+                    pitch_field += "\n\n*🤔 Customer is thinking…*"
                 elif self.last_result is not None:
                     ok, _reason = self.last_result
-                    verdict = "✅ Customer accepted the offer." if ok else "❌ Customer declined the offer."
-                    embed.description = f"### Your pitch\n{self.last_pitch}\n\n{verdict}"
-            embed.add_field(name=f"Customer #{self.customer_num}", value=self.customer_text or "…", inline=False)
+                    verdict = "*✅ Customer accepted the offer.*" if ok else "*❌ Customer declined the offer.*"
+                    pitch_field += f"\n\n{verdict}"
+                embed.add_field(name="🗣️ Your pitch", value=pitch_field, inline=False)
+            # Result details
             if self.last_pitch is not None and self.last_result is not None:
                 ok, reason = self.last_result
                 status = "✅ Success" if ok else "❌ Fail"
-                # If declined, include the customer's statement for clarity
-                if not ok and (self.customer_text or "").strip():
-                    lr = f"{status} — {reason}"
-                else:
-                    lr = f"{status} — {reason}"
-                embed.add_field(name="Last result", value=lr, inline=False)
+                lr = f"{status} — {reason}"
+                if self.last_feedback:
+                    lr += f"\n🗨️ {self.last_feedback}"
+                embed.add_field(name="📋 Last result", value=lr, inline=False)
         else:
             # End-of-game summary
             try:
@@ -930,10 +994,18 @@ class SellingView(discord.ui.View):
         # Auto-end on timeout
         self.over = True
         try:
+            ACTIVE_MINIGAMES.pop(self.owner_id, None)
+        except Exception:
+            pass
+        try:
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
             self.next_button.disabled = True
             self.end_button.disabled = True
+        except Exception:
+            pass
+        try:
+            self.stop()
         except Exception:
             pass
 
@@ -957,14 +1029,48 @@ class MinigameCommand:
             if not ud or not any(bool(s) for s in ud.get('slots', [])):
                 await interaction.response.send_message("> ❌ You need a business to play. Use /passive to create one.", ephemeral=True)
                 return
+            # If an active minigame exists, jump to it
+            try:
+                existing = ACTIVE_MINIGAMES.get(uid)
+            except Exception:
+                existing = None
+            if existing and isinstance(existing, dict):
+                try:
+                    link = existing.get('link')
+                    if link:
+                        await interaction.response.send_message(
+                            f"> ℹ️ You already have an active minigame. Jump back: {link}", ephemeral=True
+                        )
+                        return
+                except Exception:
+                    pass
             if category.value == 'selling':
-                view = SellingView(interaction.user.id, ud)
+                # Resolve display name and avatar for author
+                try:
+                    owner_name = interaction.user.display_name
+                except Exception:
+                    owner_name = None  # type: ignore[assignment]
+                try:
+                    owner_avatar = str(interaction.user.display_avatar.url)
+                except Exception:
+                    owner_avatar = None  # type: ignore[assignment]
+                view = SellingView(interaction.user.id, ud, owner_name=owner_name, owner_avatar=owner_avatar)
                 embed = view.render_embed()
                 await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
                 # Store the created message id for later edits from modal submissions
                 try:
                     msg = await interaction.original_response()
                     view.message_id = msg.id
+                    # Record as active with a jump link
+                    try:
+                        ACTIVE_MINIGAMES[uid] = {
+                            'message_id': msg.id,
+                            'channel_id': msg.channel.id if msg.channel else None,
+                            'guild_id': getattr(msg.guild, 'id', None),
+                            'link': msg.jump_url,
+                        }
+                    except Exception:
+                        pass
                 except Exception:
                     pass
             else:

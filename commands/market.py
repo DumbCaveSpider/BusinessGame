@@ -12,6 +12,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
 PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
+EQUITY_FILE = os.path.join(DATA_DIR, 'equity.json')
 
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
@@ -76,8 +77,39 @@ def _save_purchases(data: Dict[str, Any]):
         json.dump(data, f, indent=2)
 
 
+def _load_equity() -> Dict[str, Any]:
+    if not os.path.exists(EQUITY_FILE):
+        return {}
+    try:
+        with open(EQUITY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
 def _now() -> int:
     return int(time.time())
+
+
+SELL_MULTIPLIER = 0.5
+
+
+def _sell_value_for_slot(slot: Dict[str, Any]) -> int:
+    """Approximate sell value similar to passive: effective income × 0.5 + accrued."""
+    try:
+        base = float(slot.get('income_per_day', 0))
+        rating = float(slot.get('rating', 1.0))
+        effective = max(0, int(round(base * rating)))
+    except Exception:
+        effective = int(slot.get('income_per_day', 0))
+    try:
+        last = int(slot.get('last_collected_at') or slot.get('created_at') or _now())
+        elapsed = max(0, _now() - last)
+        accrued = int((elapsed / 86400.0) * effective)
+    except Exception:
+        accrued = 0
+    val = int(effective * SELL_MULTIPLIER + accrued)
+    return max(1, val)
 
 
 # --------------- Gemini helpers ---------------
@@ -509,6 +541,27 @@ class ApplyUpgradeView(discord.ui.View):
                     sslot = seller['slots'][seller_slot]
                     sslot['products_sold'] = int(sslot.get('products_sold', 0)) + 1
                     sslot['pending_collect'] = int(sslot.get('pending_collect', 0)) + int(price)
+                    # Equity payouts: load stakes and credit investors proportionally
+                    try:
+                        equity = _load_equity()
+                        stakes = (equity.get(seller_id) or {}).get(str(seller_slot)) or []
+                        if stakes:
+                            # Compute sell value approximation to scale payouts
+                            sell_val = _sell_value_for_slot(sslot)
+                            if sell_val > 0:
+                                for st in stakes:
+                                    inv = str(st.get('investor_id'))
+                                    pct = float(st.get('pct', 0.0))
+                                    if not inv or pct <= 0:
+                                        continue
+                                    # payout = product price * (pct/100) / sell_value
+                                    payout = int(max(0, round(price * (pct / 100.0) / float(sell_val))))
+                                    if payout > 0:
+                                        inv_user = data.get(inv)
+                                        if inv_user:
+                                            inv_user['balance'] = int(inv_user.get('balance', 0)) + payout
+                    except Exception:
+                        pass
         except Exception:
             pass
         _save_users(data)
