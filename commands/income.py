@@ -7,6 +7,9 @@ from discord import app_commands
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
+MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
+PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
+STOCK_FILE = os.path.join(DATA_DIR, 'stocks.json')
 
 
 def _load_users() -> Dict[str, Any]:
@@ -19,6 +22,36 @@ def _load_users() -> Dict[str, Any]:
             return {}
 
 
+def _load_market() -> Dict[str, Any]:
+    if not os.path.exists(MARKET_FILE):
+        return {"upgrades": []}
+    with open(MARKET_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {"upgrades": []}
+
+
+def _load_purchases() -> Dict[str, Any]:
+    if not os.path.exists(PURCHASED_FILE):
+        return {}
+    with open(PURCHASED_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {}
+
+
+def _load_stocks() -> Dict[str, Any]:
+    if not os.path.exists(STOCK_FILE):
+        return {"current_pct": 50.0}
+    with open(STOCK_FILE, 'r', encoding='utf-8') as f:
+        try:
+            return json.load(f)
+        except json.JSONDecodeError:
+            return {"current_pct": 50.0}
+
+
 def _now() -> int:
     return int(time.time())
 
@@ -29,6 +62,55 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
     elapsed = max(0, _now() - last)
     days = elapsed / 86400.0
     return int(days * rate)
+
+
+def _total_boost_pct(slot: Dict[str, Any], owner_id: str, slot_index: int) -> float:
+    total = 0.0
+    # Prefer purchased upgrades file
+    try:
+        purchases = _load_purchases()
+        urec = purchases.get(str(owner_id), {}) or {}
+        ups = urec.get(str(slot_index), []) or []
+        for up in ups:
+            try:
+                total += float(up.get('boost_pct', 0.0))
+            except Exception:
+                continue
+        return float(total)
+    except Exception:
+        pass
+    # Fallback to legacy upgrades stored on the slot
+    try:
+        ups_legacy = slot.get('upgrades', []) or []
+        if ups_legacy:
+            mk = _load_market()
+            u_map = {str(u.get('id')): u for u in mk.get('upgrades', [])}
+            for up in ups_legacy:
+                if isinstance(up, dict):
+                    total += float(up.get('boost_pct', 0.0))
+                else:
+                    u = u_map.get(str(up))
+                    if u is not None:
+                        total += float(u.get('boost_pct', 0.0))
+    except Exception:
+        pass
+    return float(total)
+
+
+def _effective_income_per_day(slot: Dict[str, Any], owner_id: str, slot_index: int) -> int:
+    try:
+        base = float(slot.get('income_per_day', 0))
+        rating = float(slot.get('rating', 1.0))
+        boost_pct = _total_boost_pct(slot, owner_id, slot_index)
+        mult = (1.0 + float(boost_pct) / 100.0)
+        return max(0, int(round(base * rating * mult)))
+    except Exception:
+        return int(slot.get('income_per_day', 0) or 0)
+
+
+def _disp_inc(slot: Dict[str, Any], owner_id: str, slot_index: int, stock_factor: float) -> int:
+    inc = _effective_income_per_day(slot, owner_id, slot_index)
+    return int(round(inc * (stock_factor if stock_factor else 0.0)))
 
 
 class IncomeCommand:
@@ -44,9 +126,18 @@ class IncomeCommand:
                 await interaction.response.send_message("You have no account yet. Use /passive to start.", ephemeral=True)
                 return
 
+            # Match passive display: compute stock factor once
+            stocks = _load_stocks()
+            stock_pct = float((stocks or {}).get('current_pct', 50.0))
+            stock_factor = (stock_pct / 50.0) if stock_pct != 0 else 0.0
+
             slots = user.get('slots', [])
             total_businesses = sum(1 for s in slots if s)
-            combined_rate = sum(int(s.get('income_per_day', 0)) for s in slots if s)
+            combined_rate = 0
+            for idx, s in enumerate(slots):
+                if not s:
+                    continue
+                combined_rate += _disp_inc(s, user_id, idx, stock_factor)
             ready_total = 0
             total_rating = 0.0
             for s in slots:

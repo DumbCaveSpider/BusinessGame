@@ -1,6 +1,8 @@
 import os
 import json
 import asyncio
+import time
+import random
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -78,6 +80,82 @@ async def _presence_task():
             pass
         await asyncio.sleep(60)
 
+
+# ---- Autonomous hourly stock ticker ----
+
+def _stocks_now() -> int:
+    return int(time.time())
+
+
+def _ensure_data_dir() -> None:
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception:
+        pass
+
+
+def _load_stocks() -> dict:
+    _ensure_data_dir()
+    default = {"current_pct": 50.0, "last_tick": _stocks_now(), "history": [{"t": _stocks_now(), "pct": 50.0}]}
+    return _load_json(STOCKS_FILE, default)
+
+
+def _save_stocks(data: dict) -> None:
+    _ensure_data_dir()
+    try:
+        with open(STOCKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2)
+    except Exception:
+        pass
+
+
+def _tick_stocks_if_needed() -> dict:
+    data = _load_stocks()
+    now = _stocks_now()
+    last = int(data.get('last_tick', 0) or 0)
+    if last <= 0:
+        data['last_tick'] = now
+        if not data.get('history'):
+            data['history'] = [{"t": now, "pct": float(data.get('current_pct', 50.0))}]
+        _save_stocks(data)
+        return data
+    elapsed = now - last
+    if elapsed < 3600:
+        return data
+    steps = elapsed // 3600
+    try:
+        curr = float(data.get('current_pct', 50.0))
+    except Exception:
+        curr = 50.0
+    hist = list(data.get('history', []))
+    for _ in range(int(steps)):
+        change = random.uniform(-10.0, 10.0)
+        curr = max(0.0, min(100.0, curr + change))
+        last += 3600
+        hist.append({"t": last, "pct": round(curr, 1)})
+    if len(hist) > 48:
+        hist = hist[-48:]
+    data['current_pct'] = round(curr, 1)
+    data['last_tick'] = last
+    data['history'] = hist
+    _save_stocks(data)
+    return data
+
+
+async def _stocks_task():
+    await bot.wait_until_ready()
+    # Initial tick (if needed), then loop hourly checks every minute
+    try:
+        _tick_stocks_if_needed()
+    except Exception:
+        pass
+    while not bot.is_closed():
+        try:
+            _tick_stocks_if_needed()
+        except Exception:
+            pass
+        await asyncio.sleep(60)
+
 @bot.event
 async def on_ready():
     print(f'Logged in as {bot.user}')
@@ -100,6 +178,11 @@ async def on_ready():
     # Start presence updater
     try:
         bot.loop.create_task(_presence_task())
+    except Exception:
+        pass
+    # Start autonomous stock ticker
+    try:
+        bot.loop.create_task(_stocks_task())
     except Exception:
         pass
 

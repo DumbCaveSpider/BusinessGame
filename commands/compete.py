@@ -10,6 +10,8 @@ from discord import app_commands
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
+STOCK_FILE = os.path.join(DATA_DIR, 'stocks.json')
+PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 try:
@@ -34,6 +36,99 @@ def _save_users(data: Dict[str, Any]):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(USER_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
+
+def _load_stocks() -> Dict[str, Any]:
+    if not os.path.exists(STOCK_FILE):
+        return {"current_pct": 50.0}
+    try:
+        with open(STOCK_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {"current_pct": 50.0}
+
+
+def _load_purchases() -> Dict[str, Any]:
+    if not os.path.exists(PURCHASED_FILE):
+        return {}
+    try:
+        with open(PURCHASED_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _total_boost_pct(slot: Dict[str, Any], owner_id: Optional[str], slot_index: Optional[int]) -> float:
+    """Sum boost_pct from purchased upgrades or legacy slot['upgrades'].
+    Returns total percent (e.g., 12.5 for +12.5%).
+    """
+    total = 0.0
+    try:
+        if owner_id is not None and slot_index is not None:
+            purchases = _load_purchases()
+            ups = (purchases.get(str(owner_id), {}) or {}).get(str(slot_index), []) or []
+            for up in ups:
+                try:
+                    total += float(up.get('boost_pct', 0.0))
+                except Exception:
+                    continue
+            return float(total)
+    except Exception:
+        pass
+    # Fallback: legacy upgrades inline on slot
+    try:
+        ups_legacy = slot.get('upgrades', []) or []
+        for up in ups_legacy:
+            if isinstance(up, dict):
+                total += float(up.get('boost_pct', 0.0))
+    except Exception:
+        pass
+    return float(total)
+
+
+def _effective_income_calc(slot: Dict[str, Any], owner_id: Optional[str], slot_index: Optional[int]) -> int:
+    """Return effective income_per_day scaled by rating and upgrades boost.
+    inc = income_per_day(base) * rating * (1 + total_boost_pct/100)
+    """
+    try:
+        base = float(slot.get('income_per_day', slot.get('base_income_per_day', 0)))
+        rating = float(slot.get('rating', 1.0))
+        boost_pct = _total_boost_pct(slot, owner_id, slot_index)
+        mult = 1.0 + (float(boost_pct) / 100.0)
+        return max(0, int(round(base * rating * mult)))
+    except Exception:
+        return int(slot.get('income_per_day', 0))
+
+
+def _display_income(slot: Dict[str, Any], owner_id: Optional[str], slot_index: Optional[int]) -> int:
+    """Value shown in Passive (disp_inc): effective income scaled by global stock.
+    stock_factor = current_pct / 50.0 (0 if current_pct == 0).
+    """
+    eff = _effective_income_calc(slot, owner_id, slot_index)
+    stock = _load_stocks()
+    try:
+        pct = float(stock.get('current_pct', 50.0))
+    except Exception:
+        pct = 50.0
+    stock_factor = (pct / 50.0) if pct != 0 else 0.0
+    return int(round(eff * stock_factor))
+
+
+def _display_income_with_rating(slot: Dict[str, Any], owner_id: str, slot_index: int, rating: float) -> int:
+    """Compute disp_inc but substituting a provided rating value (for before/after deltas)."""
+    try:
+        base = float(slot.get('income_per_day', slot.get('base_income_per_day', 0)))
+        boost_pct = _total_boost_pct(slot, owner_id, slot_index)
+        mult = 1.0 + (float(boost_pct) / 100.0)
+        eff = max(0, int(round(base * float(rating) * mult)))
+    except Exception:
+        eff = int(slot.get('income_per_day', 0))
+    stock = _load_stocks()
+    try:
+        pct = float(stock.get('current_pct', 50.0))
+    except Exception:
+        pct = 50.0
+    stock_factor = (pct / 50.0) if pct != 0 else 0.0
+    return int(round(eff * stock_factor))
 
 
 def _has_any_business(user: Dict[str, Any]) -> bool:
@@ -105,7 +200,7 @@ class PlayerSelect(discord.ui.Select):
             if not slot:
                 continue
             name = slot.get('name', f"Slot {idx + 1}")
-            inc = int(slot.get('income_per_day', 0))
+            inc = _display_income(slot, self.owner_id, idx)
             # Show rating with a minimum of 0.1 (no maximum cap)
             try:
                 rate = float(slot.get('rating', 0) or 0.0)
@@ -113,7 +208,7 @@ class PlayerSelect(discord.ui.Select):
                 rate = 0.0
             if rate < 0.1:
                 rate = 0.1
-            options.append(discord.SelectOption(label=name, description=f"💵 GL${inc}/day • ⭐ {rate}", value=str(idx)))
+            options.append(discord.SelectOption(label=name, description=f"💵 GL${inc}/day • ⭐ {rate:.1f}", value=str(idx)))
         disabled = False
         if not options:
             options = [
@@ -338,8 +433,8 @@ class BattleView(discord.ui.View):
             b_slot = self.b_data['slots'][self.b_choice]
             a_name = a_slot.get('name', f"Slot {self.a_choice+1}")
             b_name = b_slot.get('name', f"Slot {self.b_choice+1}")
-            a_rate = int(a_slot.get('income_per_day', 0))
-            b_rate = int(b_slot.get('income_per_day', 0))
+            a_rate = _display_income(a_slot, self.a_id, self.a_choice)
+            b_rate = _display_income(b_slot, self.b_id, self.b_choice)
             a_base = int(a_slot.get('base_income_per_day', 0))
             b_base = int(b_slot.get('base_income_per_day', 0))
             a_diff = a_rate - a_base
@@ -577,8 +672,8 @@ class BattleView(discord.ui.View):
 
             nameA = a_slot.get('name', 'Business A')
             nameB = b_slot.get('name', 'Business B')
-            rateA = int(a_slot.get('base_income_per_day', a_slot.get('income_per_day', 0)))
-            rateB = int(b_slot.get('base_income_per_day', b_slot.get('income_per_day', 0)))
+            rateA = _display_income(a_slot, self.a_id, self.a_choice)  # type: ignore[arg-type]
+            rateB = _display_income(b_slot, self.b_id, self.b_choice)  # type: ignore[arg-type]
             argA = self.a_argument or ''
             argB = self.b_argument or ''
             mentionA = f"<@{self.a_id}>"
@@ -795,8 +890,9 @@ def _apply_battle_outcome(
     b_rating: float,
     winner_char: str,
 ) -> Optional[tuple[int, int, int, int]]:
-    """Persist new incomes and wins/losses for both selected businesses.
-    Returns a tuple (a_before, a_after, b_before, b_after) or None on failure.
+    """Persist ratings and W/L only; base income remains unchanged.
+    Returns a tuple (a_before, a_after, b_before, b_after) computed as effective incomes
+    from base × rating (before/after), or None on failure.
     """
     try:
         data = _load_users()
@@ -808,21 +904,22 @@ def _apply_battle_outcome(
         b_slot = b_user['slots'][b_choice]
         if not a_slot or not b_slot:
             return None
-
-        a_base = int(a_slot.get('base_income_per_day', 0))
-        b_base = int(b_slot.get('base_income_per_day', 0))
+        # Determine base incomes for effective calc; prefer explicit base, fallback to stored income
+        a_base = int(a_slot.get('base_income_per_day', a_slot.get('income_per_day', 0)))
+        b_base = int(b_slot.get('base_income_per_day', b_slot.get('income_per_day', 0)))
         a_slot['wins'] = int(a_slot.get('wins', 0))
         a_slot['losses'] = int(a_slot.get('losses', 0))
         b_slot['wins'] = int(b_slot.get('wins', 0))
         b_slot['losses'] = int(b_slot.get('losses', 0))
-        a_rating = max(0.1, float(a_rating))
-        b_rating = max(0.1, float(b_rating))
-        a_after = max(0, int(round(a_base * a_rating)))
-        b_after = max(0, int(round(b_base * b_rating)))
-        a_before = int(a_slot.get('income_per_day', a_after))
-        b_before = int(b_slot.get('income_per_day', b_after))
-        a_slot['income_per_day'] = a_after
-        b_slot['income_per_day'] = b_after
+        # Compute before/after displayed incomes (disp_inc) using ratings; base income field unchanged
+        prev_a_rating = max(0.1, float(a_slot.get('rating', 1.0)))
+        prev_b_rating = max(0.1, float(b_slot.get('rating', 1.0)))
+        new_a_rating = max(0.1, float(a_rating))
+        new_b_rating = max(0.1, float(b_rating))
+        a_before = _display_income_with_rating(a_slot, a_id, a_choice, prev_a_rating)
+        b_before = _display_income_with_rating(b_slot, b_id, b_choice, prev_b_rating)
+        a_after = _display_income_with_rating(a_slot, a_id, a_choice, new_a_rating)
+        b_after = _display_income_with_rating(b_slot, b_id, b_choice, new_b_rating)
         # Update W/L
         if winner_char == 'A':
             a_slot['wins'] = int(a_slot.get('wins', 0)) + 1
@@ -830,9 +927,9 @@ def _apply_battle_outcome(
         elif winner_char == 'B':
             b_slot['wins'] = int(b_slot.get('wins', 0)) + 1
             a_slot['losses'] = int(a_slot.get('losses', 0)) + 1
-        # Persist final ratings with minimum clamp only
-        a_slot['rating'] = float(a_rating)
-        b_slot['rating'] = float(b_rating)
+        # Persist final ratings with minimum clamp only (leave income_per_day/base untouched)
+        a_slot['rating'] = float(new_a_rating)
+        b_slot['rating'] = float(new_b_rating)
         _save_users(data)
         return a_before, a_after, b_before, b_after
     except Exception:

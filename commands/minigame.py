@@ -12,6 +12,9 @@ from discord import app_commands
 
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
 USER_FILE = os.path.join(DATA_DIR, 'users.json')
+STOCK_FILE = os.path.join(DATA_DIR, 'stocks.json')
+MARKET_FILE = os.path.join(DATA_DIR, 'market.json')
+PURCHASED_FILE = os.path.join(DATA_DIR, 'purchased_upgrades.json')
 GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
 
 try:
@@ -37,9 +40,88 @@ def _save_users(data: Dict[str, Any]):
     with open(USER_FILE, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2)
 
-
 def _now() -> int:
     return int(time.time())
+
+
+# ----- Shared loaders for stock/upgrades (to match passive disp_inc) -----
+
+def _load_stocks() -> Dict[str, Any]:
+    if not os.path.exists(STOCK_FILE):
+        return {"current_pct": 50.0}
+    try:
+        with open(STOCK_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {"current_pct": 50.0}
+
+
+def _load_market() -> Dict[str, Any]:
+    if not os.path.exists(MARKET_FILE):
+        return {"upgrades": []}
+    try:
+        with open(MARKET_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {"upgrades": []}
+
+
+def _load_purchases() -> Dict[str, Any]:
+    if not os.path.exists(PURCHASED_FILE):
+        return {}
+    try:
+        with open(PURCHASED_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _total_boost_pct(slot: Dict[str, Any], owner_id: str | None, slot_index: int | None) -> float:
+    total = 0.0
+    try:
+        if owner_id is not None and slot_index is not None:
+            purchases = _load_purchases()
+            urec = purchases.get(str(owner_id), {}) or {}
+            ups = urec.get(str(slot_index), []) or []
+            for up in ups:
+                try:
+                    total += float(up.get('boost_pct', 0.0))
+                except Exception:
+                    continue
+            return float(total)
+    except Exception:
+        pass
+    try:
+        ups_legacy = slot.get('upgrades', []) or []
+        if ups_legacy:
+            mk = _load_market()
+            u_map = {str(u.get('id')): u for u in mk.get('upgrades', [])}
+            for up in ups_legacy:
+                if isinstance(up, dict):
+                    total += float(up.get('boost_pct', 0.0))
+                else:
+                    u = u_map.get(str(up))
+                    if u is not None:
+                        total += float(u.get('boost_pct', 0.0))
+    except Exception:
+        pass
+    return float(total)
+
+
+def _effective_income_per_day(slot: Dict[str, Any], owner_id: str | None, slot_index: int | None) -> int:
+    try:
+        base = float(slot.get('income_per_day', 0))
+        rating = float(slot.get('rating', 1.0))
+        boost_pct = _total_boost_pct(slot, owner_id, slot_index)
+        mult = (1.0 + float(boost_pct) / 100.0)
+        return max(0, int(round(base * rating * mult)))
+    except Exception:
+        return int(slot.get('income_per_day', 0) or 0)
+
+
+def _disp_inc(slot: Dict[str, Any], owner_id: str | None, slot_index: int | None, stock_factor: float) -> int:
+    inc = _effective_income_per_day(slot, owner_id, slot_index)
+    return int(round(inc * (stock_factor if stock_factor else 0.0)))
 
 
 # ----- Gemini helpers -----
@@ -151,15 +233,6 @@ async def _generate_customer_prompt(biz_name: str, biz_desc: str) -> str:
             sents[0] = sents[0] + '.'
         sents.append(follow)
 
-    # Compose and keep within ~200 chars, preferring whole sentences
-    recomposed = ' '.join(sents[:2])
-    if len(recomposed) > 200:
-        print(f"[Minigame] _generate_customer_prompt: Truncating model text from {len(recomposed)} to 200 chars.")
-        first_only = sents[0]
-        text = first_only if len(first_only) <= 200 else first_only[:197].rstrip() + '...'
-    else:
-        text = recomposed
-
     if text and text[-1] not in '.!?…':
         text += '.'
     if not text:
@@ -169,15 +242,22 @@ async def _generate_customer_prompt(biz_name: str, biz_desc: str) -> str:
 
 def _heuristic_convincing(pitch: str) -> bool:
     s = (pitch or '').lower()
-    if len(s.split()) < 8:
+    # Make it easier: require fewer words
+    if len(s.split()) < 4:
         return False
     has_num = any(ch.isdigit() for ch in s)
     has_value = any(k in s for k in [
-        "save", "increase", "boost", "improve", "benefit", "value", "roi", "return"
+        "save", "increase", "boost", "improve", "benefit", "value", "roi", "return", "free", "trial", "discount",
+        "guarantee", "warranty", "results", "risk-free", "money-back"
     ])
     has_customer = any(k in s for k in ["you", "your", "customers", "client", "audience"])  # talks to customer
-    score = (2 if has_num else 0) + (2 if has_value else 0) + (1 if has_customer else 0) + (1 if len(s) > 60 else 0)
-    return score >= 3
+    has_social = any(k in s for k in ["reviews", "testimonials", "trusted", "rated"])  # social proof
+    longish = len(s) > 40
+    # Easier scoring: lower threshold and multiple simple win conditions
+    score = (1 if has_num else 0) + (2 if has_value else 0) + (2 if has_customer else 0) + (1 if longish else 0) + (1 if has_social else 0)
+    if has_value and (has_customer or has_num or longish):
+        return True
+    return score >= 2
 
 
 async def _judge_pitch(customer_text: str, pitch: str) -> Tuple[bool, str]:
@@ -197,13 +277,96 @@ async def _judge_pitch(customer_text: str, pitch: str) -> Tuple[bool, str]:
     if verdict.startswith('YES'):
         return True, "The pitch convincing."
     if verdict.startswith('NO'):
-        return False, "The pitch unconvincing."
+        reason = await _decline_reason_model(customer_text, pitch)
+        return False, reason
     if verdict:
         print(f"[Minigame] _judge_pitch: Unrecognized verdict '{verdict[:80]}'; falling back to heuristic.")
     else:
         print("[Minigame] _judge_pitch: Empty verdict; falling back to heuristic.")
     ok = _heuristic_convincing(pitch)
-    return ok, ("Heuristic: convincing." if ok else "Heuristic: not convincing.")
+    if ok:
+        return True, "Heuristic: convincing."
+    reason = await _decline_reason_model(customer_text, pitch)
+    return False, reason
+
+
+async def _decline_reason_model(customer_text: str, pitch: str) -> str:
+    """Use the model to generate a short reason for decline using both customer prompt and user's pitch.
+    Falls back to heuristic if the model isn't available or returns an empty response.
+    """
+    guide = (
+        "In one short sentence (max 140 chars), explain why the customer would decline or why the pitch isn't convincing. "
+        "Base it on the customer's statement and the seller's pitch. Be specific (price, reliability, ROI, time, fit). "
+        "No preamble; just the reason."
+    )
+    prompt = (
+        f"Customer: {customer_text}\n"
+        f"Pitch: {pitch}\n\n"
+        f"{guide}"
+    )
+    try:
+        text = (await asyncio.wait_for(_gemini_generate(prompt), timeout=12.0)).strip()
+        # Normalize and constrain
+        text = (text or '').replace('\n', ' ').strip().strip('"').strip("'")
+        if len(text) > 140:
+            text = text[:137].rstrip() + '...'
+        if text:
+            # Ensure it starts with a capital
+            return text[0].upper() + text[1:]
+    except Exception as e:
+        print(f"[Minigame] _decline_reason_model: Model call failed ({type(e).__name__}: {e}); using heuristic reason.")
+    # Fallback
+    return _decline_reason(customer_text, pitch)
+
+
+def _decline_reason(customer_text: str, pitch: str) -> str:
+    """Explain likely reason for a decline, based on the customer's text and the pitch content.
+    Returns a short, actionable sentence.
+    """
+    ct = (customer_text or '').lower()
+    p = (pitch or '').lower()
+
+    # Basic quality checks
+    if len(p.split()) < 5:
+        return "Declined: your pitch is too short and vague. Add specifics and benefits."
+
+    has_num = any(ch.isdigit() for ch in p)
+    talks_to_customer = any(k in p for k in ["you", "your", "customers", "client", "audience"])
+    mentions_value = any(k in p for k in [
+        "save", "increase", "boost", "improve", "benefit", "value", "roi", "return", "free", "trial", "discount",
+        "results", "growth", "profit", "revenue"
+    ])
+
+    # Thematic concerns from customer text and whether pitch addresses them
+    def _missing(topic_words: List[str], reply_words: List[str]) -> bool:
+        return any(w in ct for w in topic_words) and not any(w in p for w in reply_words)
+
+    if _missing(["price", "cost", "budget", "expensive", "affordable", "cheap"], ["price", "cost", "budget", "discount", "save", "affordable"]):
+        return "They mentioned price concerns, but your pitch didn't address cost, savings, or discounts."
+
+    if _missing(["reliable", "reliability", "quality", "durable", "support", "warranty", "guarantee"], [
+        "reliable", "quality", "durable", "support", "warranty", "guarantee"
+    ]):
+        return "They asked about reliability/quality, but your pitch didn't cover support, warranty, or durability."
+
+    if _missing(["time", "busy", "setup", "easy", "quick", "fast"], ["easy", "simple", "quick", "fast", "setup", "onboarding"]):
+        return "They care about ease and time, but your pitch didn't explain how it's quick or easy to use."
+
+    if _missing(["eco", "green", "environment", "sustainable", "sustainability"], ["eco", "green", "sustainable", "recycl", "carbon"]):
+        return "They raised sustainability, but your pitch didn't mention any eco-friendly aspects."
+
+    if _missing(["roi", "return", "profit", "sales", "growth"], ["roi", "return", "profit", "sales", "growth", "results"]):
+        return "They wanted ROI/results, but your pitch didn't quantify outcomes or business impact."
+
+    if not talks_to_customer:
+        return "Declined: the pitch doesn't speak to the customer's needs ('you/your') or context."
+    if not mentions_value:
+        return "Declined: benefits/value aren't clear—explain what's in it for them."
+    if not has_num:
+        return "Declined: no concrete numbers or examples—add metrics, timelines, or guarantees."
+
+    # Fallback generic reason
+    return "They didn't see how your pitch connects clearly to their stated need. Tie benefits directly to it."
 
 
 class PitchModal(discord.ui.Modal, title="Your Sales Pitch"):
@@ -263,7 +426,7 @@ class SellingView(discord.ui.View):
         super().__init__(timeout=300)
         self.owner_id = str(owner_id)
         self.user_data = user_data
-        self.goal = random.randint(5, 10)
+        self.goal = random.randint(3, 6)
         self.lives = 3
         self.wins = 0
         self.fails = 0
@@ -283,9 +446,17 @@ class SellingView(discord.ui.View):
 
         # Business select
         options: List[discord.SelectOption] = []
+        # Compute stock factor once for display income
+        try:
+            stocks = _load_stocks()
+            stock_pct = float((stocks or {}).get('current_pct', 50.0))
+            stock_factor = (stock_pct / 50.0) if stock_pct != 0 else 0.0
+        except Exception:
+            stock_factor = 1.0
         for idx, slot in _list_user_businesses(user_data):
             name = slot.get('name', f"Slot {idx+1}")
-            inc = int(slot.get('income_per_day', 0))
+            # Use passive's disp_inc (rating × base × boosts × stock)
+            inc = _disp_inc(slot, self.owner_id, idx, stock_factor)
             rating = float(slot.get('rating', 3.0))
             desc = f"⭐ {rating:.1f} • 💵 GL${inc}/day"
             options.append(discord.SelectOption(label=name[:100], description=desc[:100], value=str(idx)))
@@ -307,11 +478,15 @@ class SellingView(discord.ui.View):
                 await interaction.response.send_message("> ❌ You have no businesses.", ephemeral=True)
                 return
             self.business_index = int(self.selector.values[0])
-            # Capture starting rating and income for summary
+            # Capture starting rating and income for summary (income uses passive's disp_inc)
             try:
                 slot0 = self._biz() or {}
                 self.start_rating = float(slot0.get('rating', 3.0))
-                self.start_income = int(slot0.get('income_per_day', 0))
+                stocks = _load_stocks()
+                stock_pct = float((stocks or {}).get('current_pct', 50.0))
+                stock_factor = (stock_pct / 50.0) if stock_pct != 0 else 0.0
+                # Compute at selection time using current rating and boosts
+                self.start_income = _disp_inc(slot0, self.owner_id, self.business_index, stock_factor)
             except Exception:
                 self.start_rating = self.start_rating or 3.0
                 self.start_income = self.start_income or 0
@@ -338,6 +513,7 @@ class SellingView(discord.ui.View):
                     try:
                         self.pitch_button.disabled = False
                         self.skip_button.disabled = False
+                        self.end_button.disabled = False
                     except Exception:
                         pass
                     try:
@@ -361,6 +537,7 @@ class SellingView(discord.ui.View):
         self.pitch_button = discord.ui.Button(label="Make pitch", style=discord.ButtonStyle.primary, disabled=True)
         self.skip_button = discord.ui.Button(label="Skip customer", style=discord.ButtonStyle.secondary, disabled=True)
         self.next_button = discord.ui.Button(label="Next customer", style=discord.ButtonStyle.success, disabled=True)
+        self.end_button = discord.ui.Button(label="End Day", style=discord.ButtonStyle.danger, disabled=True)
 
         async def _pitch_cb(interaction: discord.Interaction):
             if str(interaction.user.id) != self.owner_id:
@@ -489,24 +666,36 @@ class SellingView(discord.ui.View):
 
             asyncio.create_task(_gen_next())
 
+        async def _end_cb(interaction: discord.Interaction):
+            if str(interaction.user.id) != self.owner_id:
+                await interaction.response.send_message("> ❌ Not your minigame.", ephemeral=True)
+                return
+            # Immediately end the game without extra bonuses/penalties
+            self.over = True
+            self.thinking = False
+            try:
+                self.pitch_button.disabled = True
+                self.skip_button.disabled = True
+                self.next_button.disabled = True
+                self.end_button.disabled = True
+            except Exception:
+                pass
+            try:
+                await interaction.response.edit_message(embed=self.render_embed(), view=self)
+            except Exception:
+                try:
+                    await interaction.edit_original_response(embed=self.render_embed(), view=self)
+                except Exception:
+                    pass
+
         self.pitch_button.callback = _pitch_cb  # type: ignore[assignment]
         self.skip_button.callback = _skip_cb  # type: ignore[assignment]
         self.next_button.callback = _next_cb  # type: ignore[assignment]
+        self.end_button.callback = _end_cb  # type: ignore[assignment]
         self.add_item(self.pitch_button)
         self.add_item(self.skip_button)
         self.add_item(self.next_button)
-
-    @staticmethod
-    def _income_with_rating(base_income: int, rating: float) -> int:
-        """Compute effective income/day from base and rating.
-        Baseline at 3.0 = 1.0x. Each ±0.1 rating ≈ ±1%.
-        Clamped to [0.2x, 2.0x]."""
-        try:
-            mult = 1.0 + (float(rating) - 3.0) * 0.1
-            mult = max(0.2, min(2.0, mult))
-            return int(round(int(base_income) * mult))
-        except Exception:
-            return int(base_income)
+        self.add_item(self.end_button)
 
     def _biz(self) -> Optional[Dict[str, Any]]:
         try:
@@ -517,7 +706,7 @@ class SellingView(discord.ui.View):
             return None
 
     def _adjust_rating(self, delta: float) -> None:
-        """Adjust current business rating by delta and persist (clamped 0.0–5.0)."""
+        """Adjust current business rating by delta and persist (minimum 0.0, no upper cap)."""
         try:
             if self.business_index is None:
                 return
@@ -529,8 +718,8 @@ class SellingView(discord.ui.View):
             if not (0 <= self.business_index < len(slots)):
                 return
             slot = slots[self.business_index] or {}
-            current = float(slot.get('rating', 3.0))
-            new_val = max(0.0, min(5.0, current + delta))
+            current = float(slot.get('rating', 1.0))
+            new_val = max(0.0, current + delta)
             slot['rating'] = round(new_val, 1)
             slots[self.business_index] = slot
             ud['slots'] = slots
@@ -555,6 +744,7 @@ class SellingView(discord.ui.View):
         # Enable pitching controls
         self.pitch_button.disabled = False
         self.skip_button.disabled = False
+        self.end_button.disabled = False
 
     async def _advance_or_end(self):
         if self.wins >= self.goal:
@@ -571,6 +761,10 @@ class SellingView(discord.ui.View):
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
             self.next_button.disabled = True
+            try:
+                self.end_button.disabled = True
+            except Exception:
+                pass
             return
         if self.fails >= 3:
             self.over = True
@@ -578,6 +772,10 @@ class SellingView(discord.ui.View):
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
             self.next_button.disabled = True
+            try:
+                self.end_button.disabled = True
+            except Exception:
+                pass
             return
         # Continue to next customer
         await self._next_customer()
@@ -666,7 +864,7 @@ class SellingView(discord.ui.View):
         await self._advance_or_end()
 
     def render_embed(self) -> discord.Embed:
-        title = "Minigame — Selling to customers"
+        title = "Minigame — Sale Pitch"
         color = discord.Color.green() if not self.over else (discord.Color.gold() if self.wins >= self.goal else discord.Color.red())
         embed = discord.Embed(title=title, color=color)
         embed.add_field(name="🎯 Goal", value=f"Close {self.goal} sales", inline=True)
@@ -677,19 +875,10 @@ class SellingView(discord.ui.View):
         biz = self._biz() or {}
         embed.add_field(name="🏢 Business", value=biz.get('name', 'Business'), inline=True)
         try:
-            rating = float(biz.get('rating', 3.0))
+            rating = float(biz.get('rating', 1.0))
         except Exception:
-            rating = 3.0
-        # Show how much rating has been lost this session (from starting rating)
-        loss_note = ""
-        try:
-            base = self.start_rating if self.start_rating is not None else rating
-            delta = float(rating) - float(base)
-            if delta < 0:
-                loss_note = f" (-{abs(delta):.1f})"
-        except Exception:
-            loss_note = ""
-        embed.add_field(name="⭐ Rating", value=f"{rating:.1f}{loss_note}", inline=True)
+            rating = 1.0
+        embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     # Current customer
         if not self.over:
             # Show pitch and thinking/result in description when available
@@ -704,19 +893,28 @@ class SellingView(discord.ui.View):
             if self.last_pitch is not None and self.last_result is not None:
                 ok, reason = self.last_result
                 status = "✅ Success" if ok else "❌ Fail"
-                embed.add_field(name="Last result", value=f"{status} — {reason}", inline=False)
+                # If declined, include the customer's statement for clarity
+                if not ok and (self.customer_text or "").strip():
+                    lr = f"{status} — {reason}"
+                else:
+                    lr = f"{status} — {reason}"
+                embed.add_field(name="Last result", value=lr, inline=False)
         else:
             # End-of-game summary
             try:
                 curr = self._biz() or {}
-                curr_rating = float(curr.get('rating', 3.0))
+                curr_rating = float(curr.get('rating', 1.0))
             except Exception:
                 curr = {}
-                curr_rating = 3.0
+                curr_rating = 1.0
             start_rating = self.start_rating if self.start_rating is not None else curr_rating
-            start_income = self.start_income if self.start_income is not None else int(curr.get('income_per_day', 0))
-            before_income = self._income_with_rating(start_income, start_rating)
-            after_income = self._income_with_rating(start_income, curr_rating)
+            # Show passive-style disp_inc: includes rating, boosts, and stock factor
+            stocks = _load_stocks()
+            stock_pct = float((stocks or {}).get('current_pct', 50.0))
+            stock_factor = (stock_pct / 50.0) if stock_pct != 0 else 0.0
+            # Prefer captured start_income if available; otherwise compute from current slot as a fallback
+            before_income = int(self.start_income) if self.start_income is not None else _disp_inc(curr, self.owner_id, self.business_index, stock_factor)
+            after_income = _disp_inc(curr, self.owner_id, self.business_index, stock_factor)
             delta_rating = curr_rating - float(start_rating)
 
             if self.wins >= self.goal:
@@ -734,6 +932,8 @@ class SellingView(discord.ui.View):
         try:
             self.pitch_button.disabled = True
             self.skip_button.disabled = True
+            self.next_button.disabled = True
+            self.end_button.disabled = True
         except Exception:
             pass
 
@@ -745,7 +945,7 @@ class MinigameCommand:
         @app_commands.describe(category="Choose a minigame")
         @app_commands.choices(
             category=[
-                app_commands.Choice(name="Selling to customers", value="selling"),
+                app_commands.Choice(name="Sale Pitch", value="selling"),
             ]
         )
         @app_commands.allowed_contexts(dms=True, guilds=True, private_channels=True)

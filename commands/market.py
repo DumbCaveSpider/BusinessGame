@@ -421,7 +421,7 @@ class SlotSelectForApply(discord.ui.Select):
             if slot is None:
                 continue
             label = f"{slot.get('name', 'Business')}"
-            desc = f"Income <:greensl:1409394243025502258>{int(slot.get('income_per_day', 0))}/day"
+            desc = f"Income 💵 GL${int(slot.get('income_per_day', 0))}/day"
             options.append(discord.SelectOption(label=label[:100], description=desc[:100], value=str(idx)))
         if not options:
             options.append(discord.SelectOption(label="No available businesses", value="-1", description="Create one with /passive"))

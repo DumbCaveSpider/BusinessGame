@@ -97,8 +97,8 @@ def _now() -> int:
     return int(time.time())
 
 
-def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
-    rate = int(slot.get('income_per_day', 0))
+def _calc_accrued_for_slot(slot: Dict[str, Any], owner_id: str | None = None, slot_index: int | None = None) -> int:
+    rate = _effective_income_per_day(slot, owner_id, slot_index)
     last = int(slot.get('last_collected_at') or slot.get('created_at') or _now())
     elapsed = max(0, _now() - last)
     days = elapsed / 86400.0
@@ -106,13 +106,61 @@ def _calc_accrued_for_slot(slot: Dict[str, Any]) -> int:
     pending = int(slot.get('pending_collect', 0))
     return accrued + pending
 
+def _total_boost_pct(slot: Dict[str, Any], owner_id: str | None = None, slot_index: int | None = None) -> float:
+    """Sum boost_pct from purchased upgrades (preferred) or legacy slot['upgrades'].
+    Returns total percent (e.g., 12.5 for +12.5%).
+    """
+    total = 0.0
+    # Prefer purchases file if context is available
+    try:
+        if owner_id is not None and slot_index is not None:
+            purchases = _load_purchases()
+            urec = purchases.get(str(owner_id), {}) or {}
+            ups = urec.get(str(slot_index), []) or []
+            for up in ups:
+                try:
+                    total += float(up.get('boost_pct', 0.0))
+                except Exception:
+                    continue
+            return float(total)
+    except Exception:
+        pass
+    # Fallback to legacy upgrades stored on the slot
+    try:
+        ups_legacy = slot.get('upgrades', []) or []
+        if ups_legacy:
+            mk = _load_market()
+            u_map = {str(u.get('id')): u for u in mk.get('upgrades', [])}
+            for up in ups_legacy:
+                if isinstance(up, dict):
+                    total += float(up.get('boost_pct', 0.0))
+                else:
+                    u = u_map.get(str(up))
+                    if u is not None:
+                        total += float(u.get('boost_pct', 0.0))
+    except Exception:
+        pass
+    return float(total)
 
-def _sell_value(slot: Dict[str, Any]) -> int:
-    # Sell value scales with rating: higher rating => higher value
-    base = int(slot.get('income_per_day', 0))
-    rating = float(slot.get('rating', 1.0))
-    effective = max(0, int(round(base * rating)))
-    return int(effective * SELL_MULTIPLIER + _calc_accrued_for_slot(slot))
+
+def _effective_income_per_day(slot: Dict[str, Any], owner_id: str | None = None, slot_index: int | None = None) -> int:
+    """Return the effective income_per_day scaled by rating and upgrades boost.
+    inc_effective = income_per_day * rating * (1 + total_boost_pct/100).
+    """
+    try:
+        base = float(slot.get('income_per_day', 0))
+        rating = float(slot.get('rating', 1.0))
+        boost_pct = _total_boost_pct(slot, owner_id, slot_index)
+        mult = (1.0 + float(boost_pct) / 100.0)
+        return max(0, int(round(base * rating * mult)))
+    except Exception:
+        return int(slot.get('income_per_day', 0))
+
+
+def _sell_value(slot: Dict[str, Any], owner_id: str | None = None, slot_index: int | None = None) -> int:
+    # Sell value scales with rating and upgrades: higher effective income => higher value
+    effective = _effective_income_per_day(slot, owner_id, slot_index)
+    return int(effective * SELL_MULTIPLIER + _calc_accrued_for_slot(slot, owner_id, slot_index))
 
 
 # --------------- Gemini Scoring Integration ---------------
@@ -304,16 +352,16 @@ def _render_passive_embed(
                 field_value = "Empty"
             else:
                 name = slot.get('name', 'Business')
-                inc = int(slot.get('income_per_day', 0))
+                inc = _effective_income_per_day(slot, owner_id, idx)
                 # Use global stock (already loaded)
                 stock_pct = global_stock_pct
                 stock_factor = stock_pct / 50.0 if stock_pct != 0 else 0.0
                 disp_inc = int(round(inc * stock_factor))
-                base = int(slot.get('base_income_per_day', inc))
+                base = int(slot.get('base_income_per_day', int(slot.get('income_per_day', 0))))
                 wins = int(slot.get('wins', 0))
                 losses = int(slot.get('losses', 0))
                 rating = float(slot.get('rating', 1.0))
-                ready = _calc_accrued_for_slot(slot)
+                ready = _calc_accrued_for_slot(slot, owner_id, idx)
                 # Compute total boost from purchased upgrades file, fallback to legacy slot['upgrades']
                 slot_key = str(idx)
                 ups_from_file: List[Dict[str, Any]] = user_purchases.get(slot_key, []) if isinstance(user_purchases, dict) else []
@@ -364,12 +412,12 @@ def _render_business_embed(
     owner_avatar: str | None = None,
 ) -> discord.Embed:
     name = slot.get('name', f'Business {slot_index + 1}')
-    inc = int(slot.get('income_per_day', 0))
-    base = int(slot.get('base_income_per_day', inc))
+    inc = _effective_income_per_day(slot, owner_id, slot_index)
+    base = int(slot.get('base_income_per_day', int(slot.get('income_per_day', 0))))
     rating = float(slot.get('rating', 1.0))
     total_earned = int(slot.get('total_earned', 0))
-    ready = _calc_accrued_for_slot(slot)
-    value = _sell_value(slot)
+    ready = _calc_accrued_for_slot(slot, owner_id, slot_index)
+    value = _sell_value(slot, owner_id, slot_index)
     title = f"{name}"
     embed = discord.Embed(title=title, color=discord.Color.gold())
     if owner_avatar:
@@ -379,7 +427,7 @@ def _render_business_embed(
     stock_factor = stock_pct / 50.0 if stock_pct != 0 else 0.0
     disp_inc = int(round(inc * stock_factor))
     embed.add_field(name="📈 Rate", value=f"<:greensl:1409394243025502258>{disp_inc}/day (Base <:greensl:1409394243025502258>{base})", inline=True)
-    embed.add_field(name="📉 Stock", value=f"{stock_pct:.1f}% from <:greensl:1409394243025502258>{inc}/day", inline=True)
+    embed.add_field(name="📉 Stock", value=f"{stock_pct:.1f}% from <:greensl:1409394243025502258>{int(slot.get('income_per_day', 0))}/day", inline=True)
     embed.add_field(name="⭐ Rating", value=f"{rating:.1f}", inline=True)
     embed.add_field(name="💵 Ready to collect", value=f"<:greensl:1409394243025502258>{ready}", inline=True)
     embed.add_field(name="💰 Total earned", value=f"<:greensl:1409394243025502258>{total_earned}", inline=True)
@@ -427,10 +475,18 @@ def _render_business_embed(
 
 
 class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
-    def __init__(self, user_id: int, slot_index: int):
+    _fallback_message: discord.Message | None
+    def __init__(self, user_id: int, slot_index: int, origin_message: discord.Message | None = None, origin_channel_id: int | None = None, origin_message_id: int | None = None):
         super().__init__()
         self.user_id = str(user_id)
         self.slot_index = slot_index
+        # Message containing the original embed/view to edit in place
+        self.origin_message = origin_message
+        # IDs as a reliable fallback to refetch the message if needed
+        self.origin_channel_id = origin_channel_id
+        self.origin_message_id = origin_message_id
+        # If we fail to edit the origin message, we'll post a follow-up and keep editing that instead
+        self._fallback_message = None  # will hold a discord.Message
 
         self.name = discord.ui.TextInput(
             label="Business name",
@@ -446,11 +502,90 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         self.add_item(self.name)
         self.add_item(self.desc)
 
+    async def _resolve_origin_message(self, interaction: discord.Interaction) -> discord.Message | None:
+        """Resolve and cache the original message to edit, using cached object or fetch by IDs."""
+        if self.origin_message is not None:
+            return self.origin_message
+        try:
+            if self.origin_channel_id and self.origin_message_id and interaction.client:
+                # Try cache first
+                ch = interaction.client.get_channel(self.origin_channel_id)  # type: ignore[attr-defined]
+                # If not cached, try fetching the channel from API
+                if ch is None:
+                    try:
+                        ch = await interaction.client.fetch_channel(self.origin_channel_id)  # type: ignore[attr-defined]
+                    except Exception:
+                        ch = None
+                # If still None but we're in the same channel, use interaction.channel
+                if ch is None and interaction.channel_id == self.origin_channel_id:
+                    ch = interaction.channel  # type: ignore[assignment]
+                if ch is not None and hasattr(ch, 'fetch_message'):
+                    msg = await ch.fetch_message(self.origin_message_id)  # type: ignore[attr-defined]
+                    self.origin_message = msg
+                    return msg
+        except Exception:
+            return None
+        return None
+
+    async def _edit_origin(self, interaction: discord.Interaction, *, embed: discord.Embed | None = None, view: discord.ui.View | None = None, content: str | None = None) -> bool:
+        """Edit the origin message in place; if unavailable, send/update a follow-up message.
+
+        Returns True if we successfully showed the update somewhere, False otherwise.
+        """
+        # Prefer editing the original message in place
+        msg = self.origin_message
+        try:
+            if msg is None:
+                msg = await self._resolve_origin_message(interaction)
+            if msg is not None:
+                await msg.edit(content=content, embed=embed, view=view)
+                self.origin_message = msg
+                return True
+        except Exception as e:
+            print(f"[Modal] Failed to edit origin message: {type(e).__name__}: {e}")
+
+        # Fallback: edit previously posted follow-up message if available
+        if self._fallback_message is not None:
+            try:
+                msg2 = self._fallback_message
+                if isinstance(msg2, discord.Message):
+                    await msg2.edit(content=content, embed=embed, view=view)
+                    return True
+            except Exception as e:
+                print(f"[Modal] Failed to edit fallback message: {type(e).__name__}: {e}")
+
+        # Final fallback: post a follow-up message (requires the interaction to be deferred or responded)
+        try:
+            # Ensure we've at least acknowledged the interaction
+            if not interaction.response.is_done():
+                try:
+                    await interaction.response.defer()
+                except Exception:
+                    pass
+            # Send follow-up with only the provided fields to satisfy type checking
+            if embed is not None and view is not None:
+                sent = await interaction.followup.send(content=(content if content is not None else ""), embed=embed, view=view, ephemeral=False)
+            elif embed is not None:
+                sent = await interaction.followup.send(content=(content if content is not None else ""), embed=embed, ephemeral=False)
+            elif view is not None:
+                sent = await interaction.followup.send(content=(content if content is not None else ""), view=view, ephemeral=False)
+            else:
+                sent = await interaction.followup.send(content=(content if content is not None else ""), ephemeral=False)
+            # Keep editing this message for future updates
+            if isinstance(sent, discord.Message):
+                self._fallback_message = sent
+            return True
+        except Exception as e:
+            print(f"[Modal] Failed to send follow-up message: {type(e).__name__}: {e}")
+            return False
+
     async def on_submit(self, interaction: discord.Interaction):
-        # Send an initial ephemeral message (or followup) that we can safely edit later.
-        # This avoids Unknown Webhook errors from editing a missing original response.
-        sent_original = False
-        progress_msg: discord.Message | None = None
+        # Acknowledge the modal submit quickly; we'll edit the original message in place.
+        if not interaction.response.is_done():
+            try:
+                await interaction.response.defer()
+            except Exception:
+                pass
 
         owner_name = interaction.user.display_name
         try:
@@ -458,7 +593,7 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         except Exception:
             owner_avatar = None
 
-        # 1) Show progress message
+        # 1) Show progress on the original message embed (edit in place)
         progress = discord.Embed(
             title="Creating your business...",
             description="### 🖊️ Scoring your idea. This may take a few seconds.",
@@ -467,45 +602,22 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         progress.add_field(name="Name", value=self.name.value, inline=False)
         if self.desc.value:
             progress.add_field(name="About", value=self.desc.value[:1024], inline=False)
-        # Prefer sending a fresh ephemeral message instead of deferring+editing.
-        if not interaction.response.is_done():
-            await interaction.response.send_message(embed=progress, ephemeral=True)
-            sent_original = True
-            try:
-                progress_msg = await interaction.original_response()
-            except Exception:
-                progress_msg = None
-        else:
-            # If something already responded, fall back to a followup message
-            try:
-                progress_msg = await interaction.followup.send(embed=progress, ephemeral=True, wait=True)
-            except Exception:
-                progress_msg = None
+        # Edit the original message; use helper to ensure we only edit in place
+        await self._edit_origin(interaction, embed=progress, view=None)
 
         # 2) Score with Gemini
         difficulty, earning, realistic = await _score_business_with_gemini(self.name.value, self.desc.value)
         total = difficulty + earning + realistic
-        income_per_day = total
+        # Ensure a minimum income of 1/day if the score totals to 0
+        base_income = total if total > 0 else 1
+        income_per_day = base_income
 
         # 3) Persist the business
         data = _load_users()
         user = data.get(self.user_id)
         if user is None:
-            if sent_original:
-                try:
-                    await interaction.edit_original_response(content="User record missing.", embed=None, view=None)
-                except Exception:
-                    if progress_msg is not None:
-                        try:
-                            await progress_msg.edit(content="User record missing.", embed=None, view=None)
-                        except Exception:
-                            pass
-            else:
-                if progress_msg is not None:
-                    try:
-                        await progress_msg.edit(content="User record missing.", embed=None, view=None)
-                    except Exception:
-                        pass
+            # Update the original message if possible; otherwise do nothing (no new messages)
+            await self._edit_origin(interaction, content="User record missing.", embed=None, view=None)
             return
 
         user['slots'][self.slot_index] = {
@@ -518,8 +630,9 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
                 'total': total,
             },
             'income_per_day': income_per_day,
-            'base_income_per_day': total,
-            'difference': total - income_per_day,
+            'base_income_per_day': base_income,
+            # Keep difference stable at 0 for new businesses
+            'difference': 0,
             'rating': 1.0,
             'wins': 0,
             'losses': 0,
@@ -546,21 +659,13 @@ class CreateBusinessModal(discord.ui.Modal, title="Create Business"):
         slot = final_user['slots'][self.slot_index]
         final_embed = _render_business_embed(slot, self.slot_index, final_user, owner_id=self.user_id, owner_name=owner_name, owner_avatar=owner_avatar)
         final_embed.description = (final_embed.description + "\n" if final_embed.description else "") + "### ✅ Business created successfully."
-        if sent_original:
-            try:
-                await interaction.edit_original_response(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
-            except Exception:
-                if progress_msg is not None:
-                    try:
-                        await progress_msg.edit(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
-                    except Exception:
-                        pass
-        else:
-            if progress_msg is not None:
-                try:
-                    await progress_msg.edit(embed=final_embed, view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar))
-                except Exception:
-                    pass
+        # 4) Replace with the new business embed + actions
+        await self._edit_origin(
+            interaction,
+            embed=final_embed,
+            view=BusinessView(self.user_id, self.slot_index, owner_name=owner_name, owner_avatar=owner_avatar),
+        )
+        # If edit fails, we do nothing (no new messages)
 
 
 class SlotSelect(discord.ui.Select):
@@ -619,7 +724,13 @@ class SlotSelect(discord.ui.Select):
         # Lock the view to block further interactions until modal completes
         if self.view is not None:
             setattr(self.view, "locked", True)
-        await interaction.response.send_modal(CreateBusinessModal(interaction.user.id, idx))
+        await interaction.response.send_modal(CreateBusinessModal(
+            interaction.user.id,
+            idx,
+            origin_message=interaction.message,
+            origin_channel_id=(interaction.channel.id if interaction.channel else None),
+            origin_message_id=(interaction.message.id if interaction.message else None),
+        ))
 
 
 class SlotView(discord.ui.View):
@@ -666,7 +777,7 @@ class BusinessView(discord.ui.View):
             await interaction.response.edit_message(embed=_render_passive_embed(user, "Slot is empty", owner_id=self.user_id, owner_name=self.owner_name, owner_avatar=self.owner_avatar), view=SlotView(user, self.user_id, self.owner_name, self.owner_avatar))
             return
         slot = user['slots'][self.slot_index]
-        amount = _calc_accrued_for_slot(slot)
+        amount = _calc_accrued_for_slot(slot, self.user_id, self.slot_index)
         if amount <= 0:
             await interaction.response.send_message("> ℹ️ Nothing to collect yet.", ephemeral=True)
             return
@@ -711,7 +822,7 @@ class BusinessView(discord.ui.View):
                 await interaction.response.send_message(msg, ephemeral=True)
                 return
         name = slot.get('name', f'Slot {self.slot_index + 1}')
-        value = _sell_value(slot)
+        value = _sell_value(slot, self.user_id, self.slot_index)
         user['balance'] = int(user.get('balance', 0)) + int(value)
         user['slots'][self.slot_index] = None
         _save_users(data)

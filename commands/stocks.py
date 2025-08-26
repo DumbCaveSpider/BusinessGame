@@ -91,8 +91,8 @@ def _tick_if_needed() -> Dict[str, Any]:
 def _apply_stock_to_all_users(stock_pct: float) -> None:
     data = _load_users()
     changed = False
-    # Factor baseline: 50% => 1.0x
-    factor = (stock_pct / 50.0) if stock_pct != 0 else 0.0
+    # Factor baseline: 100% => 1.0x
+    factor = (stock_pct / 100.0) if stock_pct != 0 else 0.0
     for uid, user in list(data.items()):
         slots = user.get('slots', []) or []
         for idx, slot in enumerate(slots):
