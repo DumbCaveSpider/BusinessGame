@@ -262,7 +262,14 @@ async def _judge_pitch(customer_text: str, pitch: str) -> Tuple[bool, str]:
         print(f"[Minigame] _judge_pitch: Model call failed ({type(e).__name__}: {e}); using heuristic judge.")
         verdict = ''
     if verdict.startswith('YES'):
-        return True, "The pitch convincing."
+        # Include a short acceptance reason from the customer's perspective
+        try:
+            ar = (await asyncio.wait_for(_accept_reason_model(customer_text, pitch), timeout=9.0)).strip()
+        except Exception:
+            ar = ''
+        if not ar:
+            ar = _accept_reason(customer_text, pitch)
+        return True, ar
     if verdict.startswith('NO'):
         reason = await _decline_reason_model(customer_text, pitch)
         return False, reason
@@ -272,7 +279,14 @@ async def _judge_pitch(customer_text: str, pitch: str) -> Tuple[bool, str]:
         print("[Minigame] _judge_pitch: Empty verdict; falling back to heuristic.")
     ok = _heuristic_convincing(pitch)
     if ok:
-        return True, "Heuristic: convincing."
+        # Heuristic acceptance: generate a concise acceptance reason
+        try:
+            ar = (await asyncio.wait_for(_accept_reason_model(customer_text, pitch), timeout=9.0)).strip()
+        except Exception:
+            ar = ''
+        if not ar:
+            ar = _accept_reason(customer_text, pitch)
+        return True, ar
     reason = await _decline_reason_model(customer_text, pitch)
     return False, reason
 
@@ -295,43 +309,92 @@ async def _decline_reason_model(customer_text: str, pitch: str) -> str:
         text = (await asyncio.wait_for(_gemini_generate(prompt), timeout=12.0)).strip()
         # Normalize and constrain
         text = (text or '').replace('\n', ' ').strip().strip('"').strip("'")
+        if text:
+            return text
     except Exception as e:
         print(f"[Minigame] _decline_reason_model: Model call failed ({type(e).__name__}: {e}); using heuristic reason.")
-    # Fallback
-    return _decline_reason(customer_text, pitch)
-
-
-def _decline_reason(customer_text: str, pitch: str) -> str:
-    """Explain likely reason for a decline, based on the customer's text and the pitch content.
-    Returns a short, actionable sentence.
-    """
+    # Heuristic fallback in-line (no generic function)
     ct = (customer_text or '').lower()
     p = (pitch or '').lower()
-
-    # Basic quality checks
     if len(p.split()) < 5:
         return "Declined: your pitch is too short and vague. Add specifics and benefits."
-
-    has_num = any(ch.isdigit() for ch in p)
     talks_to_customer = any(k in p for k in ["you", "your", "customers", "client", "audience"])
     mentions_benefit = any(k in p for k in [
-        "save", "increase", "boost", "improve", "benefit", "return", "free", "trial", "discount",
-        "results", "growth", "profit", "revenue"
+        "save", "increase", "boost", "improve", "benefit", "return", "roi", "results", "growth",
+        "profit", "revenue", "convert", "faster", "quick", "time", "support", "guarantee"
     ])
-
-    # Thematic concerns from customer text and whether pitch addresses them
-    def _missing(topic_words: List[str], reply_words: List[str]) -> bool:
-        return any(w in ct for w in topic_words) and not any(w in p for w in reply_words)
-
+    has_num = any(ch.isdigit() for ch in p)
     if not talks_to_customer:
         return "Declined: the pitch doesn't speak to the customer's needs ('you/your') or context."
     if not mentions_benefit:
         return "Declined: benefits aren't clear—explain what's in it for them."
     if not has_num:
         return "Declined: no concrete numbers or examples—add metrics, timelines, or guarantees."
+    return "They didn't see how your pitch connects clearly to their stated need."
 
-    # Fallback generic reason
-    return "They didn't see how your pitch connects clearly to their stated need. Tie benefits directly to it."
+
+async def _accept_reason_model(customer_text: str, pitch: str) -> str:
+    """Use the model to generate a short reason for acceptance using both customer prompt and user's pitch.
+    Falls back to heuristic if the model isn't available or returns an empty response.
+    """
+    guide = (
+        "In one short sentence (max 140 chars), explain why the customer would accept the offer. "
+        "Base it on the customer's statement and the seller's pitch. Be specific (value/price, fit, ROI, speed, proof). "
+        "No preamble; just the reason."
+    )
+    prompt = (
+        f"Customer: {customer_text}\n"
+        f"Pitch: {pitch}\n\n"
+        f"{guide}"
+    )
+    try:
+        text = (await asyncio.wait_for(_gemini_generate(prompt), timeout=12.0)).strip()
+        # Normalize and constrain
+        text = (text or '').replace('\n', ' ').strip().strip('"').strip("'")
+        if text:
+            return text
+    except Exception as e:
+        print(f"[Minigame] _accept_reason_model: Model call failed ({type(e).__name__}: {e}); using heuristic reason.")
+    # Fallback
+    return _accept_reason(customer_text, pitch)
+
+
+def _accept_reason(customer_text: str, pitch: str) -> str:
+    """Short positive reason why the pitch convinces the customer, based on content signals."""
+    ct = (customer_text or '').lower()
+    p = (pitch or '').lower()
+
+    has_num = any(ch.isdigit() for ch in p)
+    talks_to_customer = any(k in p for k in ["you", "your", "customers", "client", "audience"])  # addressing
+    mentions_benefit = any(k in p for k in [
+        "save", "increase", "boost", "improve", "benefit", "return", "roi", "results", "growth",
+        "profit", "revenue", "convert", "faster", "quick", "time", "support", "guarantee"
+    ])
+    has_social = any(k in p for k in ["reviews", "testimonials", "trusted", "rated", "case study", "proof"])  # social proof
+
+    reasons: list[str] = []
+    if talks_to_customer:
+        reasons.append("it speaks directly to your needs")
+    if mentions_benefit:
+        reasons.append("the benefits are clear")
+    if has_num:
+        reasons.append("with concrete numbers/guarantees")
+    if has_social:
+        reasons.append("backed by proof")
+
+    if not reasons:
+        return "It addresses the stated need with clear, tangible value."
+    # Build a compact sentence from up to 2-3 fragments
+    if len(reasons) == 1:
+        body = reasons[0]
+    elif len(reasons) == 2:
+        body = f"{reasons[0]} and {reasons[1]}"
+    else:
+        body = f"{reasons[0]}, {reasons[1]}, and {reasons[2]}"
+    return f"It was convincing because {body}."
+
+
+    
 
 
 async def _feedback_for_pitch(customer_text: str, pitch: str, accepted: bool) -> str:
@@ -343,11 +406,11 @@ async def _feedback_for_pitch(customer_text: str, pitch: str, accepted: bool) ->
     if not pv:
         return "No pitch to respond to."
     if not GEMINI_API_KEY or genai is None:
-        # Heuristic fallback
+        # Heuristic/model fallback path without model availability
         if accepted:
             return "Clear fit and benefits made the choice easy."
-        # Leverage decline reason to craft feedback
-        why = _decline_reason(ct, pv)
+        # Use decline reason model (which has in-line heuristic) to craft feedback
+        why = await _decline_reason_model(ct, pv)
         return f"I'd need this addressed: {why.replace('Declined: ', '')}"
     try:
         intent = (
@@ -356,7 +419,7 @@ async def _feedback_for_pitch(customer_text: str, pitch: str, accepted: bool) ->
             "You declined the offer. In ONE short sentence (<=120 chars), say what would have convinced you."
         )
         prompt = (
-            "From the customer's perspective, give feedback about the seller's pitch. "
+            "From the customer's perspective, give feedback about the seller's pitch."
             "Be specific and actionable.\n\n"
             f"Customer: {ct}\n"
             f"Pitch: {pv}\n\n"
@@ -370,13 +433,13 @@ async def _feedback_for_pitch(customer_text: str, pitch: str, accepted: bool) ->
         if not fb:
             if accepted:
                 return "Clear fit and benefits made the choice easy."
-            why = _decline_reason(ct, pv)
+            why = await _decline_reason_model(ct, pv)
             return f"I'd need this addressed: {why.replace('Declined: ', '')}"
         return fb
     except Exception:
         if accepted:
             return "Clear fit and benefits made the choice easy."
-        why = _decline_reason(ct, pv)
+        why = await _decline_reason_model(ct, pv)
         return f"I'd need this addressed: {why.replace('Declined: ', '')}"
 
 
@@ -828,13 +891,18 @@ class SellingView(discord.ui.View):
 
     async def apply_result_and_advance(self, interaction: discord.Interaction):
         ok, reason = self.last_result if isinstance(self.last_result, tuple) else (False, "")
-        # Generate customer feedback for the pitch
-        try:
-            self.last_feedback = (await asyncio.wait_for(
-                _feedback_for_pitch(self.customer_text or '', self.last_pitch or '', ok), timeout=9.0
-            )).strip()
-        except Exception:
+        # Customer feedback: if accepted, it is already included in the reason from _judge_pitch.
+        # For declines, add a concise feedback line to guide improvement.
+        if ok:
+            # Avoid duplicating feedback; clear separate feedback field
             self.last_feedback = None
+        else:
+            try:
+                self.last_feedback = (await asyncio.wait_for(
+                    _feedback_for_pitch(self.customer_text or '', self.last_pitch or '', False), timeout=9.0
+                )).strip()
+            except Exception:
+                self.last_feedback = None
         # Compute reward/penalty and ensure user exists
         data_check = _load_users()
         ud_check = data_check.get(self.owner_id)
